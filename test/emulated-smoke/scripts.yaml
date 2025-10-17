@@ -1,0 +1,99 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: emulated-scripts
+data:
+  entrypoint.sh: |
+    #!/bin/bash
+    set -o nounset
+
+    on-exit() {
+      echo replication job finished at $(date)
+      echo hanging...
+      while true; do
+        sleep 5s
+      done
+    }
+
+    trap on-exit EXIT TERM
+
+    ( apt update && apt install -y gettext ) > /dev/null 2>&1
+
+    echo starting at $(date)
+
+    IN_CONFIG=/scripts/replicator.yaml
+    OUT_CONFIG=/local/replicator.yaml
+
+    echo "Waiting for $OUT_CONFIG to not exist..."
+    while [ -e "$OUT_CONFIG" ]; do
+      sleep 1
+    done
+    echo done
+
+    echo "Configuring Replicator:"
+    envsubst <"$IN_CONFIG" >"$OUT_CONFIG.tmp"
+    cat "$OUT_CONFIG.tmp"
+    echo
+    mv "$OUT_CONFIG.tmp" "$OUT_CONFIG"
+
+    echo "Waiting for Replicator to [re]start and accept the config..."
+    while [ -e "$OUT_CONFIG" ]; do
+      sleep 1
+    done
+    echo done
+
+    echo "Waiting for .restore files to appear..."
+    while [ "$(ls /local/*.restore 2>/dev/null | wc -l)" -ne $WORKER_COUNT ]; do
+        sleep 1
+    done
+    echo done
+
+    ls -l /local/
+
+    for f in /local/*.restore; do
+      echo "$f" $(< $f)
+      RESTORE_STEP=$(< $f)
+    done
+    rm /local/*.restore
+
+    STEP_NUMBER="${RESTORE_STEP:=${START_STEP}}"
+
+    echo Starting at "${RESTORE_STEP}"
+
+    while [ "${STEP_NUMBER}" -lt $((RESTORE_STEP+5)) ]; do
+      echo "Creating checkpoint $STEP_NUMBER"
+      for ((w=0;w<"${WORKER_COUNT}";w++)); do
+        f="/local/emulated-s${STEP_NUMBER}-n${NODE_RANK}-g${w}.save"
+        t="${f}.tmp"
+        echo "${STEP_NUMBER}" > "${t}"
+        mv "${t}" "${f}"
+      done
+      sleep 1
+      [ -e /local/fail ] && exit
+
+      let STEP_NUMBER=STEP_NUMBER+1
+    done
+
+  replicator.yaml: |
+    job-name: emulated
+    node-rank: $NODE_RANK
+    nodes: $NODE_COUNT
+    workers-per-node: $WORKER_COUNT
+    master: tcp://$MASTER_IP:$MASTER_PORT
+    master-port: $MASTER_PORT
+    peers-per-node: 2
+    backup-interval-minutes: 10
+    framework: pytorch

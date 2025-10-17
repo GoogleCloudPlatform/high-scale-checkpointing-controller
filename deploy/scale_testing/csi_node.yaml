@@ -1,0 +1,214 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+kind: DaemonSet
+apiVersion: apps/v1
+metadata:
+  name: csi
+  namespace: gkecheckpoint
+spec:
+  selector:
+    matchLabels:
+      app: csi
+  template:
+    metadata:
+      labels:
+        app: csi
+    spec:
+      hostNetwork: true
+      serviceAccountName: csi-node
+      nodeSelector:
+        kubernetes.io/os: linux
+        # Until COS 109 17800-218-14 is out, we need to run on ubuntu.
+        cloud.google.com/gke-os-distribution: ubuntu
+      containers:
+        - name: registrar
+          image: gke.gcr.io/csi-node-driver-registrar:v2.5.1-gke.1
+          args:
+            - "--v=5"
+            - "--csi-address=/csi/csi.sock"
+            - "--kubelet-registration-path=/var/lib/kubelet/plugins/ramdisk.csi.storage.gke.io/csi.sock"
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: registration-dir
+              mountPath: /registration
+        - name: csi
+          image: REPOSITORY/checkpoint_csi_driver:latest
+          imagePullPolicy: Always
+          args:
+            - "--v=5"
+            - "--endpoint=unix:/csi/csi.sock"
+            - "--brd-size-mib=10"
+            - "--node-ip=$(NODE_IP)"
+            - "--topology-configmap=topology"
+            - "--csi-node-id=$(NODE_NAME)"
+            - "--namespace=$(NAMESPACE)"
+          env:
+          - name: NODE_IP
+            valueFrom:
+              fieldRef:
+                fieldPath: status.hostIP
+          - name: NODE_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: spec.nodeName
+          - name: NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: kubelet-pods-dir
+              mountPath: /var/lib/kubelet/pods
+              mountPropagation: "Bidirectional"
+            - name: plugin-dir
+              mountPath: /csi
+            - name: sys
+              mountPath: /sys
+            - name: modules
+              mountPath: /lib/modules
+            - name: iscsi
+              mountPath: /etc/iscsi
+            - name: run
+              mountPath: /run
+            - name: dev
+              mountPath: /dev
+            - mountPath: /etc/ssh/sshd_config
+              subPath: sshd_config
+              readOnly: true
+              name: ssh-config
+            - mountPath: /root/.ssh/config
+              subPath: ssh_config
+              readOnly: true
+              name: ssh-config
+            - mountPath: /root/.ssh/authorized_keys
+              subPath: key
+              readOnly: true
+              name: public-key
+            - mountPath: /root/.ssh/key.pub
+              subPath: key
+              readOnly: true
+              name: public-key
+            - mountPath: /root/.ssh/key
+              subPath: key
+              readOnly: true
+              name: private-key
+      volumes:
+        - name: registration-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins_registry/
+            type: Directory
+        - name: kubelet-pods-dir
+          hostPath:
+            path: /var/lib/kubelet/pods
+            type: Directory
+        - name: plugin-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins/ramdisk.csi.storage.gke.io
+            type: DirectoryOrCreate
+        - name: sys
+          hostPath:
+            path: /sys
+            type: DirectoryOrCreate
+        - name: modules
+          hostPath:
+            path: /lib/modules
+            type: DirectoryOrCreate
+        - name: iscsi
+          hostPath:
+            path: /etc/iscsi
+            type: DirectoryOrCreate
+        - name: run
+          hostPath:
+            path: /run
+            type: DirectoryOrCreate
+        - name: dev
+          hostPath:
+            path: /dev
+            type: DirectoryOrCreate
+        - configMap:
+            name: ssh-config
+          name: ssh-config
+        - secret:
+            secretName: ssh-private
+            defaultMode: 0700
+          name: private-key
+        - secret:
+            secretName: ssh-public
+            defaultMode: 0700
+          name: public-key
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ssh-config
+  namespace: gkecheckpoint
+data:
+  # These should should depending on your cluster & test.
+  sshd_config: |-
+    PasswordAuthentication no
+    ChallengeResponseAuthentication no
+    UsePAM no
+    SyslogFacility AUTH
+    # The sftp subsystem is used by scp.
+    Subsystem sftp /usr/lib/openssh/sftp-server
+    LogLevel DEBUG
+    Protocol 2
+    Port 6798
+
+  ssh_config: |-
+    Host *
+      Port 6798
+      StrictHostKeyChecking no
+      UserKnownHostsFile /dev/null
+---
+# These secrets are used to provide ssh connectivity for scp based
+# replication. A side effect is that anyone in the gkecheckpoint
+# namespace will be able to ssh into the privilged CSI daemonset.
+# In fact, anyone who can read this yaml file will be able as well.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ssh-public
+  namespace: gkecheckpoint
+data:
+  # ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINtpN3hDushYH7BW4+jA3A/ipjmu80U13sLOJ8OocKLV
+  key: c3NoLWVkMjU1MTkgQUFBQUMzTnphQzFsWkRJMU5URTVBQUFBSU50cE4zaER1c2hZSDdCVzQrakEzQS9pcGptdTgwVTEzc0xPSjhPb2NLTFYK
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ssh-private
+  namespace: gkecheckpoint
+data:
+  # -----BEGIN OPENSSH PRIVATE KEY-----
+  # b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+  # QyNTUxOQAAACDbaTd4Q7rIWB+wVuPowNwP4qY5rvNFNd7CzifDqHCi1QAAAKjUKMmQ1CjJ
+  # kAAAAAtzc2gtZWQyNTUxOQAAACDbaTd4Q7rIWB+wVuPowNwP4qY5rvNFNd7CzifDqHCi1Q
+  # AAAEAUcKWdPWOVOxX0lrIaXiSNdvbRxETIvXLoL52LXYfp1dtpN3hDushYH7BW4+jA3A/i
+  # pjmu80U13sLOJ8OocKLVAAAAIG1hdHRjYXJ5QG1hdHRjYXJ5LmMuZ29vZ2xlcnMuY29tAQ
+  # IDBAU=
+  # -----END OPENSSH PRIVATE KEY-----
+  key: |
+    LS0tLS1CRUdJTiBPUEVOU1NIIFBSSVZBVEUgS0VZLS0tLS0KYjNCbGJuTnphQzFyWlhrdGRqRUFB
+    QUFBQkc1dmJtVUFBQUFFYm05dVpRQUFBQUFBQUFBQkFBQUFNd0FBQUF0emMyZ3RaVwpReU5UVXhP
+    UUFBQUNEYmFUZDRRN3JJV0Ird1Z1UG93TndQNHFZNXJ2TkZOZDdDemlmRHFIQ2kxUUFBQUtqVUtN
+    bVExQ2pKCmtBQUFBQXR6YzJndFpXUXlOVFV4T1FBQUFDRGJhVGQ0UTdySVdCK3dWdVBvd053UDRx
+    WTVydk5GTmQ3Q3ppZkRxSENpMVEKQUFBRUFVY0tXZFBXT1ZPeFgwbHJJYVhpU05kdmJSeEVUSXZY
+    TG9MNTJMWFlmcDFkdHBOM2hEdXNoWUg3Qlc0K2pBM0EvaQpwam11ODBVMTNzTE9KOE9vY0tMVkFB
+    QUFJRzFoZEhSallYSjVRRzFoZEhSallYSjVMbU11WjI5dloyeGxjbk11WTI5dEFRCklEQkFVPQot
+    LS0tLUVORCBPUEVOU1NIIFBSSVZBVEUgS0VZLS0tLS0K
+

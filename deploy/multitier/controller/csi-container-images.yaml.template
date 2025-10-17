@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: checkpoint-image-config
+data:
+  custom-image-config-name: custom-checkpoint-image-config
+  custom-image-config-docs: |
+    To override an image used in the checkpointing node driver, create a
+    configmap in this namespace with the name given by the
+    `custom-image-config-name` field in this configmap.
+
+    When a new daemonset is created, the images in that custom configmap will
+    override any image here, using the same field name (`csi-image`,
+    `replication-worker-image`, etc). This overriding will take place even
+    if this configmap is updated to contain newer images.
+  registrar-image: gke.gcr.io/csi-node-driver-registrar:v2.9.4-gke.3@sha256:e9ff64a44314d49168ec5fae8ab98d75b4bd5aae00e03faf5b0d5ef94cb72a83
+  csi-image: DRIVER_IMAGE_NAME
+  replication-worker-image: STUB_IMAGE_NAME
+  nfs-server-image: NFS_SERVER_NAME

@@ -1,0 +1,113 @@
+// Copyright 2025 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package replication;
+
+option go_package = "gke-internal.googlesource.com/gke-storage/high-scale-checkpointing/lib/replication";
+
+
+// The gRPC service for replication worker operations
+service ReplicationService {
+  // Discovery methods
+  rpc RegisterCoordinator(RegisterCoordinatorRequest)
+    returns (RegisterCoordinatorResponse) {}
+
+  rpc GetCoordinator(GetCoordinatorRequest)
+    returns (GetCoordinatorResponse) {}
+
+  rpc UnregisterCoordinator(UnregisterCoordinatorRequest)
+    returns (UnregisterCoordinatorResponse) {}
+
+  // Replication methods
+  rpc SetReplicationPeer(SetReplicationPeerRequest)
+    returns (SetReplicationPeerResponse) {}
+
+  rpc MountGCSBucket(MountGCSBucketRequest)
+    returns (MountGCSBucketResponse) {}
+
+  rpc UnmountPeer(UnmountPeerRequest)
+    returns (UnmountPeerResponse) {}
+
+  rpc UnmountAllPeers(UnmountAllPeersRequest)
+    returns (UnmountAllPeersResponse) {}
+}
+
+// RegisterCoordinator messages
+message RegisterCoordinatorRequest {
+  string job_name = 1;
+  string ip = 2;
+}
+
+message RegisterCoordinatorResponse {
+  // Intentionally empty.
+}
+
+// GetCoordinator messages
+message GetCoordinatorRequest {
+  string job_name = 1;
+}
+
+message GetCoordinatorResponse {
+  string ip = 1;
+}
+
+// UnregisterCoordinator messages
+message UnregisterCoordinatorRequest {
+  string job_name = 1;
+  string ip = 2;
+}
+
+message UnregisterCoordinatorResponse {
+  // Intentionally empty.
+}
+
+// SetReplicationPeer messages
+message SetReplicationPeerRequest {
+  string local_mountpoint = 1;
+  string target_ip = 2;
+}
+
+message SetReplicationPeerResponse {
+  // Intentionally empty.
+}
+
+// MountGCSBucket messages
+message MountGCSBucketRequest {
+  string local_mountpoint = 1;
+  // Add optional fields here for future credentials or bucket specification
+}
+
+message MountGCSBucketResponse {
+  // Intentionally empty.
+}
+
+// UnmountPeer messages
+message UnmountPeerRequest {
+  string local_mountpoint = 1;
+}
+
+message UnmountPeerResponse {
+  // Intentionally empty.
+}
+
+// UnmountAllPeers messages
+message UnmountAllPeersRequest {
+  // Intentionally empty.
+}
+
+message UnmountAllPeersResponse {
+  // Intentionally empty.
+}

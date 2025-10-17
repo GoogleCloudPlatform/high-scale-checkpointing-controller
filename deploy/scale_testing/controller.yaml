@@ -1,0 +1,49 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: topology
+  namespace: gkecheckpoint
+data:
+  gke-ckpt-pod-count: "5"
+  gke-ckpt-workload-label: worker-test
+---
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: controller
+  namespace: gkecheckpoint
+  labels:
+    app: controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: controller
+  template:
+    metadata:
+      labels:
+        app: controller
+    spec:
+      nodeSelector:
+        target: controller
+      serviceAccountName: checkpoint-controller
+      containers:
+      - name: controller
+        image: REPOSITORY/checkpoint-controller:latest
+        imagePullPolicy: Always
+        args:
+        - --namespace=gkecheckpoint
+        - --configmap=topology

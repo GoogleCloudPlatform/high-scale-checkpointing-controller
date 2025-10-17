@@ -1,0 +1,45 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This checkpoint configuration can be used with the multitier jobset
+# and gives an environment matching that used for multitier scale tests.
+#
+# !BUCKET! should be replaced by a GCS bucket. Note HNS must be enabled.
+
+apiVersion: checkpointing.gke.io/v1
+kind: CheckpointConfiguration
+metadata:
+  name: deploy-test
+spec:
+  cloudStorageBucketName: !BUCKET!
+  nodeSelector:
+    node.kubernetes.io/instance-type: e2-small
+  tolerations:
+  - key: checkpoint
+    operator: Exists
+    effect: NoSchedule
+  inMemoryVolumeSize: "10"
+  csiEphemeralLimit: 50Mi
+  gcsFuseMountOptions:
+  - implicit-dirs
+  - metadata-cache:negative-ttl-secs:0
+  - metadata-cache:ttl-secs:-1
+  - metadata-cache:stat-cache-max-size-mb:-1
+  - metadata-cache:type-cache-max-size-mb:-1
+  - file-cache:max-size-mb:-1
+  - file-cache:cache-file-for-range-read:true
+  - file-system:kernel-list-cache-ttl-secs:0
+  - file-cache:enable-parallel-downloads:true
+  - read_ahead_kb=1024
+  - write:enable-streaming-writes:true

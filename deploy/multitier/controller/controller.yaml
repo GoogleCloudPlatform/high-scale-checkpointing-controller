@@ -1,0 +1,111 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: high-scale-checkpointing-controller
+  labels:
+    app: high-scale-checkpointing-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: high-scale-checkpointing-controller
+  template:
+    metadata:
+      labels:
+        app: high-scale-checkpointing-controller
+    spec:
+      serviceAccountName: gke-checkpointing-multitier-controller
+      containers:
+      - name: high-scale-checkpointing
+        imagePullPolicy: Always
+        image: imagetag/controller
+        args:
+        - --v=5
+        - --managed-namespace=gke-managed-checkpointing
+        - --csi-service-account-name=gke-checkpointing-multitier-node
+        - --image-configmap-name=checkpoint-image-config
+        - --local-deploy=true
+        - --http-endpoint=:22060
+        - --driver-name=multitier-checkpoint.csi.storage.gke.io
+        - --replication-worker-debug-backup=false
+        - --ranks-server-port=19346
+        - --enable-uptime-controller=true
+        resources:
+          limits:
+          requests:
+            cpu: 1
+            memory: 2Gi
+        livenessProbe:
+          failureThreshold: 1
+          httpGet:
+            path: /healthz
+            port: http-endpoint
+          initialDelaySeconds: 10
+          timeoutSeconds: 10
+          periodSeconds: 20
+        ports:
+        - name: http-endpoint
+          containerPort: 22060
+          protocol: TCP
+---
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: high-scale-checkpointing-ranks
+  labels:
+    app: high-scale-checkpointing-ranks
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: high-scale-checkpointing-ranks
+  template:
+    metadata:
+      labels:
+        app: high-scale-checkpointing-ranks
+    spec:
+      serviceAccountName: gke-checkpointing-rank-server-sa
+      containers:
+      - name: server
+        image: imagetag/ranks
+        resources:
+          requests:
+            cpu: 3
+            memory: 4Gi
+        args:
+        - --namespace=$(NAMESPACE)
+        - --driver-name=multitier-checkpoint.csi.storage.gke.io
+        - --ranks-server-port=19346
+        env:
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        ports:
+        - name: ranks
+          containerPort: 19346
+          protocol: TCP
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: high-scale-checkpointing-controller
+spec:
+  ports:
+  - port: 19346 # See --ranks-server-port, above
+    protocol: TCP
+  selector:
+    app: high-scale-checkpointing-ranks

@@ -1,0 +1,77 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: emulated-training
+  labels:
+    app: emulated-training
+spec:
+  selector:
+    matchLabels:
+      app: emulated-training
+  replicas: NUM_NODES
+  podManagementPolicy: Parallel
+  template:
+    metadata:
+      labels:
+        app: emulated-training
+    spec:
+      hostname: emulated-training-
+      subdomain: emulated-training
+      serviceAccountName: "default"
+      terminationGracePeriodSeconds: 1
+      tolerations:
+      - key: NODE_TAINT
+        operator: Exists
+        effect: NoSchedule
+      nodeSelector:
+        node.kubernetes.io/instance-type: NODE_TYPE
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: emulated-training
+              topologyKey: "kubernetes.io/hostname"
+      containers:
+      - name: training
+        image: debian
+        command: ["bash", "-c", "/scripts/entrypoint.sh"]
+        env:
+        - name: START_STEP
+          value: "0"
+        - name: MASTER_PORT
+          value: "4242"
+        - name: NODE_RANK
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.labels['apps.kubernetes.io/pod-index']
+        - name: NODE_COUNT
+          value: "NUM_NODES"
+        - name: WORKER_COUNT
+          value: "2"
+        volumeMounts:
+        - name: ramdisk
+          mountPath: /local
+        - name: scripts
+          mountPath: /scripts
+      volumes:
+      - name: ramdisk
+        csi:
+          driver: multitier-checkpoint.csi.storage.gke.io
+      - name: scripts
+        configMap:
+          name: emulated-scripts
+          defaultMode: 0500

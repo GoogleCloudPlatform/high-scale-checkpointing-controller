@@ -1,0 +1,99 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: csi-node
+  namespace: gkecheckpoint
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: csi-node-role
+  namespace: gkecheckpoint
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "update", "create"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: csi-node-role-binding
+  namespace: gkecheckpoint
+subjects:
+  - kind: ServiceAccount
+    name: csi-node
+roleRef:
+  kind: Role
+  name: csi-node-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: checkpoint-controller
+  namespace: gkecheckpoint
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: checkpoint-controller-role
+  namespace: gkecheckpoint
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "configmaps"]
+    verbs: ["get", "list", "watch", "update"]
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    verbs: ["get", "create", "list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: checkpoint-controller-role-binding
+  namespace: gkecheckpoint
+subjects:
+  - kind: ServiceAccount
+    name: checkpoint-controller
+roleRef:
+  kind: Role
+  name: checkpoint-controller-role
+  apiGroup: rbac.authorization.k8s.io
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: checkpoint-controller-cluster-role
+rules:
+  - apiGroups: [checkpointing.gke.io]
+    resources: [checkpointconfigurations]
+    verbs: [get, list, watch, patch, update]
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: checkpoint-controller-cluster-binding
+subjects:
+- kind: ServiceAccount
+  name: checkpoint-controller
+  namespace: gkecheckpoint
+roleRef:
+  kind: ClusterRole
+  name: checkpoint-controller-cluster-role
+  apiGroup: rbac.authorization.k8s.io
+---
