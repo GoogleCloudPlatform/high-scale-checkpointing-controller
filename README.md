@@ -68,3 +68,19 @@ The current recommended options are as follows. This requires at least 1.32.2-gk
   read_ahead_kb=1024
   write:enable-streaming-writes:true
 ```
+
+## Documentation
+
+Checkpoint Replicator is designed to be hosted in multiple runtime environments.
+
+For using it on Google Kubernetes Engine (GKE) you don't have to build/deploy it yourself as fully-managed GKE addon is available. See the following docs (MTC stands for Multi-Tier Checkpointing):
+
+* [MTC BLOG post](https://cloud.google.com/blog/products/ai-machine-learning/using-multi-tier-checkpointing-for-large-ai-training-jobs) 
+
+* [MTC User Guide](https://cloud.google.com/kubernetes-engine/docs/how-to/machine-learning/training/multi-tier-checkpointing)
+
+* [MaxText MTC documentation](https://maxtext.readthedocs.io/en/latest/guides/checkpointing_solutions/multi_tier_checkpointing.html) (for training on TPUs)
+
+* [NeMo MTC recipe](https://github.com/AI-Hypercomputer/gpu-recipes/blob/main/training/a3ultra/llama3-1-405b/nemo-pretraining-gke-resiliency/goodput-guide.md#2-multi-tier-checkpointing-strategy-leveraging-gcs-with-fuse) (for training on GPUs)
+
+[Checkpoint Replicator](https://github.com/GoogleCloudPlatform/checkpoint-replicator) is Open-Source as well.
