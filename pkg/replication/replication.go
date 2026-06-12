@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -53,6 +54,9 @@ const (
 	coordinatorAddressKey = "ip"
 	mountCmd              = "/bin/mount"
 	umountCmd             = "/bin/umount"
+
+	coordinatorUpdateStaleKey = "highscalecheckpointing.gke.io/last-update"
+	coordinatorStaleSeconds   = 3600
 )
 
 type ServerOptions struct {
@@ -279,6 +283,7 @@ func (r *replicationServer) RegisterCoordinator(ctx context.Context, req *proto.
 		configMap.Data = map[string]string{}
 	}
 	configMap.Data[coordinatorAddressKey] = req.Ip
+	configMap.GetObjectMeta().GetAnnotations()[coordinatorUpdateStaleKey] = fmt.Sprintf("%d", time.Now().Unix())
 
 	if needCreate {
 		klog.Infof("coordinator info for job %q not found, creating %v", req.JobName, configMap)
@@ -420,7 +425,7 @@ func (r *replicationServer) fetchJobCoordinator(ctx context.Context, job string)
 	var ip string
 	if configMap != nil && configMap.Data != nil {
 		val, found := configMap.Data[coordinatorAddressKey]
-		if found {
+		if found && configMapIsFresh(configMap) {
 			ip = val
 		}
 	}
@@ -434,12 +439,34 @@ func (r *replicationServer) fetchJobCoordinator(ctx context.Context, job string)
 		}
 		if configMap != nil && configMap.Data != nil {
 			val, found := configMap.Data[coordinatorAddressKey]
-			if found {
+			if found && configMapIsFresh(configMap) {
 				ip = val
 			}
 		}
 	}
 	return ip, ctx.Err()
+}
+
+func configMapIsFresh(configMap *corev1.ConfigMap) bool {
+	if configMap == nil {
+		return false
+	}
+	tsStr, found := configMap.GetObjectMeta().GetAnnotations()[coordinatorUpdateStaleKey]
+	if !found {
+		klog.Warningf("No update annotation for %s, ignoring", configMap.GetName())
+		return false
+	}
+	ts, err := strconv.ParseInt(tsStr, 10, 64)
+	if err != nil {
+		klog.Warningf("Bad annotation %s=%s in %s, ignoring", coordinatorUpdateStaleKey, tsStr, configMap.GetName())
+		return false
+	}
+	delta := time.Now().Unix() - ts
+	if delta > coordinatorStaleSeconds {
+		klog.Infof("%s is stale (%ds), will wait for update", configMap.GetName(), delta)
+		return false
+	}
+	return true
 }
 
 // queryCoordinatorConfigMap looks for a job configmap and returns one, or nil if not found.
