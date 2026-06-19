@@ -283,7 +283,12 @@ func (r *replicationServer) RegisterCoordinator(ctx context.Context, req *proto.
 		configMap.Data = map[string]string{}
 	}
 	configMap.Data[coordinatorAddressKey] = req.Ip
-	configMap.GetObjectMeta().GetAnnotations()[coordinatorUpdateStaleKey] = fmt.Sprintf("%d", time.Now().Unix())
+	annotations := configMap.GetObjectMeta().GetAnnotations()
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	annotations[coordinatorUpdateStaleKey] = fmt.Sprintf("%d", time.Now().Unix())
+	configMap.GetObjectMeta().SetAnnotations(annotations)
 
 	if needCreate {
 		klog.Infof("coordinator info for job %q not found, creating %v", req.JobName, configMap)

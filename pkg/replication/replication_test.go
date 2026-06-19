@@ -25,6 +25,7 @@ import (
 
 	"gotest.tools/v3/assert"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -226,4 +227,33 @@ func TestCoordinatorStaleRegistration(t *testing.T) {
 	assert.NilError(t, err)
 
 	assert.Equal(t, <-delayedGet, "10.0.0.2") // 10.0.0.1 means we fetched the stale one.
+}
+
+func TestCoordinatorMissingAnnotations(t *testing.T) {
+	ctx, cleanup := mustSetupCluster(t)
+	defer cleanup(ctx)
+
+	_, err := kubeClient.CoreV1().ConfigMaps(replicatorNamespace).Create(ctx, &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "job",
+			Namespace: replicatorNamespace,
+		},
+		Data: map[string]string{
+			"ip": "unknown.ip.address.net",
+		},
+	}, metav1.CreateOptions{})
+	assert.NilError(t, err)
+
+	var delayedGet = make(chan string)
+	go func() {
+		deadline, cancel := context.WithDeadline(ctx, time.Now().Add(time.Minute))
+		rsp, err := server.GetCoordinator(deadline, &proto.GetCoordinatorRequest{JobName: "job"})
+		assert.NilError(t, err)
+		cancel()
+		delayedGet <- rsp.Ip
+	}()
+
+	_, err = server.RegisterCoordinator(ctx, &proto.RegisterCoordinatorRequest{JobName: "job", Ip: "10.0.0.2"})
+	assert.NilError(t, err)
+	assert.Equal(t, <-delayedGet, "10.0.0.2") // "unknown.ip.address.net" means we fetched the stale one.
 }
