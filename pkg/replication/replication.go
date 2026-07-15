@@ -23,8 +23,10 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc"
@@ -57,6 +59,8 @@ const (
 
 	coordinatorUpdateStaleKey = "highscalecheckpointing.gke.io/last-update"
 	coordinatorStaleSeconds   = 3600
+
+	defaultPeerUnmountTimeout = 10 * time.Second
 )
 
 type ServerOptions struct {
@@ -67,6 +71,8 @@ type ServerOptions struct {
 	PersistentBase string
 	NfsExport      string
 	MetricsManager metrics.MetricsManager
+
+	PeerUnmountTimeout time.Duration
 }
 
 type replicationServer struct {
@@ -91,6 +97,10 @@ var _ ReplicationServer = &replicationServer{}
 func NewServer(kubeClient *kubernetes.Clientset, opts ServerOptions) (ReplicationServer, error) {
 	factory := informers.NewSharedInformerFactoryWithOptions(kubeClient, resyncPeriod, informers.WithNamespace(opts.Namespace))
 	informer := factory.Core().V1().ConfigMaps()
+
+	if opts.PeerUnmountTimeout == 0 {
+		opts.PeerUnmountTimeout = defaultPeerUnmountTimeout
+	}
 
 	server := &replicationServer{
 		kubeClient:        kubeClient,
@@ -386,14 +396,57 @@ func (r *replicationServer) UnmountAllPeers(ctx context.Context, req *proto.Unmo
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "cannot list peers: %v", err)
 	}
-	errs := []error{}
+	ctx, cancel := context.WithTimeout(ctx, r.opts.PeerUnmountTimeout)
+	defer cancel()
+
+	var (
+		wg   sync.WaitGroup
+		mu   sync.Mutex
+		errs []error
+	)
+
+	// Unmount asynchronously to avoid hanging on a slow unmount.
+	// Since unmount is done lazily, this rarely occurs.
 	for _, target := range mountPoints {
-		if err := r.unmountPeerInternal(ctx, target); err != nil {
-			errs = append(errs, fmt.Errorf("while unmounting %s: %w", target, err))
-		}
+		wg.Add(1)
+		go func(target string) {
+			defer wg.Done()
+
+			// Each goroutine executes with the timeout-derived context.
+			if err := r.unmountPeerInternal(ctx, target); err != nil {
+				// Protect the error slice from concurrent writes.
+				mu.Lock()
+				errs = append(errs, fmt.Errorf("while unmounting %s: %w", target, err))
+				mu.Unlock()
+			}
+		}(target)
 	}
-	if len(errs) > 0 {
-		return nil, status.Errorf(codes.Internal, "unmount errors: %v", errs)
+
+	// unmountPeerInternal can't be depended on to exit on a canceled context, so
+	// the timeout is handled here.
+	wgDone := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(wgDone)
+	}()
+
+	select {
+	case <-wgDone:
+		// All mounts finished (successfully or otherwise).
+	case <-ctx.Done():
+		// Timeout; add the error (cognizant that unmounts may still be running).
+		mu.Lock()
+		errs = append(errs, ctx.Err())
+		mu.Unlock()
+	}
+
+	// Protect against late-running unmounts.
+	mu.Lock()
+	returnedErrs := slices.Clone(errs)
+	mu.Unlock()
+
+	if len(returnedErrs) > 0 {
+		return nil, status.Errorf(codes.Internal, "unmount errors: %v", returnedErrs)
 	}
 	return &proto.UnmountAllPeersResponse{}, nil
 }
@@ -406,8 +459,8 @@ func (r *replicationServer) unmountPeerInternal(ctx context.Context, peerDir str
 		klog.Infof("%s not found to unmount", target)
 		return nil
 	}
-	// On any other error, we'll try to unmount and see what happens.
-	_, umountErr := util.RunCommand(umountCmd, target)
+	// On any other error, we'll try to unmount, lazily, and see what happens.
+	_, umountErr := util.RunCommand(umountCmd, "-l", target)
 	rmdirErr := os.Remove(target)
 	sentinalErr := removeSentinal(target)
 	if umountErr != nil {

@@ -826,6 +826,43 @@ func TestMultitierPeer(t *testing.T) {
 	assert.NilError(t, err)
 }
 
+func TestMultitierHungUnmount(t *testing.T) {
+	ctx := context.Background()
+
+	cleanup := deployMultitier(ctx, t)
+	defer cleanup()
+
+	initializeTestSlices(ctx, t, 1, 4)
+	testPods := checkMultitierCluster(ctx, t, 4)
+
+	_, err := runAPIOnPod(ctx, t, &testPods[0], "set-peer", "--mountpoint", "m1", "--ip", testPods[1].Status.PodIP)
+	assert.NilError(t, err)
+	_, err = runAPIOnPod(ctx, t, &testPods[0], "set-peer", "--mountpoint", "m2", "--ip", testPods[2].Status.PodIP)
+	assert.NilError(t, err)
+
+	ns := testPods[1].GetNamespace()
+	target := testPods[1].GetName()
+	t.Logf("Deleting pod %s/%s", ns, target)
+	err = K8sClient.CoreV1().Pods(ns).Delete(ctx, target, metav1.DeleteOptions{})
+	assert.NilError(t, err)
+	waitFor(ctx, t, func(ctx context.Context) (bool, error) {
+		_, err := K8sClient.CoreV1().Pods(ns).Get(ctx, target, metav1.GetOptions{})
+		if err != nil && !apierrors.IsNotFound(err) {
+			t.Errorf("Unexpected error getting deleted pod: %v", err)
+		}
+		return apierrors.IsNotFound(err), nil
+	})
+
+	start := time.Now()
+	t.Logf("started unmount at %v", start)
+	_, err = runAPIOnPod(ctx, t, &testPods[0], "unmount-all")
+	t.Logf("ended unmount in %v", time.Now().Sub(start))
+	if err != nil && !(strings.Contains(err.Error(), "context deadline") || strings.Contains(err.Error(), "DeadlineExceeded")) {
+		t.Errorf("Expected no error or timeout error but got %v", err)
+	}
+	assert.Assert(t, time.Now().Sub(start) < 30*time.Second)
+}
+
 func TestMultitierGCSBucket(t *testing.T) {
 	ctx := context.Background()
 

@@ -18,6 +18,7 @@ import (
 	"context"
 	"flag"
 	"path/filepath"
+	"time"
 
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
@@ -55,6 +56,8 @@ var (
 	coordinatorPort     = flag.Int("coordinator-port", 8476, "The coordinator port to use in the process info file.")
 	legacyIdFile        = flag.Bool("legacy-id-file", false, "Use the legacy idfile rank management")
 	ranksServerTarget   = flag.String("ranks-server-target", "", "The ranks controller gRPC service")
+
+	peerUnmountTimeout = flag.Duration("peer-unmount-timeout", 10*time.Second, "Timeout per peer unmount")
 
 	version string // This should be set during build.
 )
@@ -169,13 +172,14 @@ func main() {
 	}
 
 	replOpts := replication.ServerOptions{
-		Namespace:      *namespace,
-		CpcName:        *cpcName,
-		PeerBase:       *peerDir,
-		RemoteBase:     *remoteDir,
-		PersistentBase: *persistentDir,
-		NfsExport:      *nfsExportDir,
-		MetricsManager: mm,
+		Namespace:          *namespace,
+		CpcName:            *cpcName,
+		PeerBase:           *peerDir,
+		RemoteBase:         *remoteDir,
+		PersistentBase:     *persistentDir,
+		NfsExport:          *nfsExportDir,
+		MetricsManager:     mm,
+		PeerUnmountTimeout: *peerUnmountTimeout,
 	}
 
 	replicationServer, err := replication.NewServer(kubeClient, replOpts)
