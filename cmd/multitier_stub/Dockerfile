@@ -12,7 +12,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
 FROM gke.gcr.io/debian-base:bookworm-v1.0.4-gke.17 AS debian
 RUN clean-install \
   bash \
-  procps file xxd lsof iputils-ping dnsutils # all for debugging
+  procps file xxd lsof iputils-ping dnsutils iproute2 iptables # all for debugging
 
 COPY --from=builder /src/multitier_stub /usr/bin/
 

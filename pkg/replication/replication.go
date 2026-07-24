@@ -21,6 +21,7 @@ import (
 	"io/fs"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"slices"
@@ -454,13 +455,20 @@ func (r *replicationServer) UnmountAllPeers(ctx context.Context, req *proto.Unmo
 func (r *replicationServer) unmountPeerInternal(ctx context.Context, peerDir string) error {
 	target := filepath.Join(r.opts.PeerBase, peerDir)
 	klog.Infof("trying unmount of %s", target)
-	if _, err := os.Stat(target); errors.Is(err, os.ErrNotExist) || !checkSentinal(target) {
-		// Nothing to unmount.
-		klog.Infof("%s not found to unmount", target)
+	if !checkSentinal(target) {
+		klog.Warningf("No sentinel found for %q", target)
 		return nil
 	}
 	// On any other error, we'll try to unmount, lazily, and see what happens.
 	_, umountErr := util.RunCommand(umountCmd, "-l", target)
+	if umountErr != nil {
+		var exitErr *exec.ExitError
+		if errors.As(umountErr, &exitErr) && (exitErr.ExitCode() == 1 || exitErr.ExitCode() == 32) {
+			klog.Infof("Target %s already unmounted (skip): %v", target, umountErr)
+			umountErr = nil
+		}
+	}
+
 	rmdirErr := os.Remove(target)
 	sentinalErr := removeSentinal(target)
 	if umountErr != nil {

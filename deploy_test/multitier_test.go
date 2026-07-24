@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+
 	"regexp"
 	"slices"
 	"strconv"
@@ -90,7 +91,7 @@ func checkMultitierCluster(ctx context.Context, t *testing.T, numPods int) []cor
 }
 
 func runAPIOnPod(ctx context.Context, t *testing.T, pod *corev1.Pod, cmd string, args ...string) (string, error) {
-	output, err := runOnPod(ctx, t, pod, "replication-worker", "multitier_stub", slices.Concat([]string{"--cmd", cmd}, args)...)
+	output, err := runOnPod(ctx, t, pod, "replication-worker", "/usr/bin/multitier_stub", slices.Concat([]string{"--cmd", cmd}, args)...)
 	t.Logf("Running %s on %s got %s", cmd, pod.GetName(), output)
 	if err != nil {
 		return "", err
@@ -863,6 +864,54 @@ func TestMultitierHungUnmount(t *testing.T) {
 	assert.Assert(t, time.Now().Sub(start) < 30*time.Second)
 }
 
+func TestMultitierHungUnmountBlackhole(t *testing.T) {
+	ctx := context.Background()
+
+	cleanup := deployMultitier(ctx, t)
+	defer cleanup()
+
+	initializeTestSlices(ctx, t, 1, 4)
+	testPods := checkMultitierCluster(ctx, t, 4)
+
+	// Mount pod 1 onto pod 0
+	_, err := runAPIOnPod(ctx, t, &testPods[0], "set-peer", "--mountpoint", "m1", "--ip", testPods[1].Status.PodIP)
+	if err != nil {
+		out, _ := util.RunCommand("kubectl", "describe", "pod", testPods[0].GetName(), "-n", testPods[0].GetNamespace())
+		t.Logf("Pod describe output:\n%s\n", out)
+		t.Fatalf("set-peer failed: %v", err)
+	}
+
+	targetIP := testPods[1].Status.PodIP
+
+	// We simulate a network partition that drops packets using iptables DROP.
+	// This makes os.Stat and synchronous umount block indefinitely, allowing us to accurately simulate the hang.
+	t.Logf("Creating iptables DROP rule to %s to block NFS", targetIP)
+	_, err = runOnPod(ctx, t, &testPods[0], "replication-worker", "iptables", "-I", "OUTPUT", "-d", targetIP, "-j", "DROP")
+	if err != nil {
+		t.Fatalf("iptables DROP failed. Error was: %v", err)
+	} else {
+		defer func() {
+			_, _ = runOnPod(ctx, t, &testPods[0], "replication-worker", "iptables", "-D", "OUTPUT", "-d", targetIP, "-j", "DROP")
+		}()
+	}
+
+	t.Logf("Sleeping for 65 seconds to allow NFS cache (acdirmax) to expire...")
+	time.Sleep(65 * time.Second)
+
+	start := time.Now()
+	t.Logf("started unmount at %v", start)
+	_, err = runAPIOnPod(ctx, t, &testPods[0], "unmount-all")
+	duration := time.Since(start)
+	t.Logf("ended unmount in %v", duration)
+
+	if err != nil && !(strings.Contains(err.Error(), "context deadline") || strings.Contains(err.Error(), "DeadlineExceeded")) {
+		t.Errorf("Expected no error or timeout error but got %v", err)
+	}
+
+	// Unmount should complete successfully well within 30s. If it hits 2 minutes or indefinitely, it's stuck.
+	assert.Assert(t, duration < 30*time.Second, "unmount-all blocked for %v, suspected hang", duration)
+}
+
 func TestMultitierGCSBucket(t *testing.T) {
 	ctx := context.Background()
 
@@ -1306,4 +1355,40 @@ func TestScaleMultitierPodFailures(t *testing.T) {
 		assert.Assert(t, found && newIdx == idx, "bad idx after recreate: for %s got (%t) %d, expected %d", node, found, newIdx, idx)
 	}
 	t.Logf("verified consistent indicies post-restart!")
+}
+
+func TestMultitierAlreadyUnmountedOrNotExist(t *testing.T) {
+	ctx := context.Background()
+
+	cleanup := deployMultitier(ctx, t)
+	defer cleanup()
+
+	initializeTestSlices(ctx, t, 1, 4)
+	testPods := checkMultitierCluster(ctx, t, 4)
+
+	t.Logf("Testing unmount on non-existent peer-id")
+	_, err := runAPIOnPod(ctx, t, &testPods[0], "unmount", "--mountpoint", "non-existent-peer")
+	if err != nil {
+		t.Fatalf("Expected success for non-existent peer, got error: %v", err)
+	}
+
+	t.Logf("Setting up peer m1")
+	_, err = runAPIOnPod(ctx, t, &testPods[0], "set-peer", "--mountpoint", "m1", "--ip", testPods[1].Status.PodIP)
+	if err != nil {
+		t.Fatalf("set-peer failed: %v", err)
+	}
+
+	t.Logf("First unmount (should succeed)")
+	_, err = runAPIOnPod(ctx, t, &testPods[0], "unmount", "--mountpoint", "m1")
+	if err != nil {
+		t.Fatalf("First unmount failed: %v", err)
+	}
+
+	t.Logf("Second unmount (should succeed because it's already unmounted)")
+	_, err = runAPIOnPod(ctx, t, &testPods[0], "unmount", "--mountpoint", "m1")
+	if err != nil {
+		t.Fatalf("Second unmount failed handling already-unmounted case: %v", err)
+	}
+
+	t.Log("Done testing already unmounted errors")
 }
