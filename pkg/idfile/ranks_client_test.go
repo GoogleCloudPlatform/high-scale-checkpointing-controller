@@ -32,10 +32,6 @@ import (
 	proto "gke-internal.googlesource.com/gke-storage/high-scale-checkpointing/lib/grpc/ranks/proto"
 )
 
-const (
-	clientTestTarget = ":48932"
-)
-
 type ranksClientTestService struct {
 	reqChan chan *proto.UpdateRequest
 	rspChan chan *proto.UpdateResponse
@@ -89,7 +85,8 @@ func (u *ranksClientTestUpdater) reset() {
 
 func startTestService(t *testing.T) (chan *proto.UpdateRequest, chan *proto.UpdateResponse, proto.RanksServiceClient, func()) {
 	t.Helper()
-	lis, err := net.Listen("tcp", clientTestTarget)
+	// Use dynamic port allocation to prevent port collisions.
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	assert.NilError(t, err)
 
 	// Note the channels must be buffered as the Unmount call is blocking.
@@ -99,7 +96,7 @@ func startTestService(t *testing.T) (chan *proto.UpdateRequest, chan *proto.Upda
 	proto.RegisterRanksServiceServer(grpcSvr, testSvr)
 	go func() { grpcSvr.Serve(lis) }()
 
-	conn, err := grpc.Dial(clientTestTarget, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.Dial(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	assert.NilError(t, err)
 
 	clientApi := proto.NewRanksServiceClient(conn)
