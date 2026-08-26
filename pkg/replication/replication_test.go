@@ -203,16 +203,21 @@ func TestCoordinatorStaleRegistration(t *testing.T) {
 	ctx, cleanup := mustSetupCluster(t)
 	defer cleanup(ctx)
 
+	_, err := kubeClient.CoreV1().ConfigMaps(replicatorNamespace).Create(ctx, &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "job",
+			Namespace: replicatorNamespace,
+			Annotations: map[string]string{
+				coordinatorUpdateStaleKey: fmt.Sprintf("%d", time.Now().Unix()-4800),
+			},
+		},
+		Data: map[string]string{
+			coordinatorAddressKey: "10.0.0.1",
+		},
+	}, metav1.CreateOptions{})
+	assert.NilError(t, err)
+
 	var delayedGet = make(chan string)
-
-	_, err := server.RegisterCoordinator(ctx, &proto.RegisterCoordinatorRequest{JobName: "job", Ip: "10.0.0.1"})
-	assert.NilError(t, err)
-	configMap, err := kubeClient.CoreV1().ConfigMaps(replicatorNamespace).Get(ctx, "job", metav1.GetOptions{})
-	assert.NilError(t, err)
-	configMap.GetObjectMeta().GetAnnotations()[coordinatorUpdateStaleKey] = fmt.Sprintf("%d", time.Now().Unix()-4800)
-	_, err = kubeClient.CoreV1().ConfigMaps(replicatorNamespace).Update(ctx, configMap, metav1.UpdateOptions{})
-	assert.NilError(t, err)
-
 	go func() {
 		deadline, cancel := context.WithDeadline(ctx, time.Now().Add(time.Minute))
 		rsp, err := server.GetCoordinator(deadline, &proto.GetCoordinatorRequest{JobName: "job"})
@@ -220,8 +225,6 @@ func TestCoordinatorStaleRegistration(t *testing.T) {
 		cancel()
 		delayedGet <- rsp.Ip
 	}()
-
-	time.Sleep(5 * time.Second) // Give the GetCoordinator time to try the stale one.
 
 	_, err = server.RegisterCoordinator(ctx, &proto.RegisterCoordinatorRequest{JobName: "job", Ip: "10.0.0.2"})
 	assert.NilError(t, err)
