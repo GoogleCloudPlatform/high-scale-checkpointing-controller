@@ -12,8 +12,12 @@ _repo_check=$(if $(findstring //,$(REPO_PATH)),$(error Must specify PROJECT or R
 verify:
 	hack/verify-all.sh
 
+# Omit packages without test files to avoid Go 1.25 covdata error (https://github.com/golang/go/issues/75031)
 unit-test:
-	go test -v=false -mod=vendor -timeout 20m "./pkg/..." -cover
+	@PKGS=$$(go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./pkg/...) || exit 1; \
+	if [ -n "$$PKGS" ]; then \
+		go test -v=false -mod=vendor -timeout 20m -cover $$PKGS; \
+	fi
 
 build-and-push:
 	$(call _repo_check)
