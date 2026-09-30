@@ -21,7 +21,7 @@ SHELL ["/bin/bash", "-c"]
 COPY --from=builder /src/multitier_ranks /
 RUN /print-missing-deps.sh
 
-FROM gcr.io/distroless/base-debian12 AS final
+FROM gcr.io/distroless/base-debian13 AS final
 COPY --from=check /multitier_ranks /
 ENTRYPOINT ["/multitier_ranks"]
 

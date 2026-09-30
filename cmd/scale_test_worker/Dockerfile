@@ -9,6 +9,6 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
     -ldflags -extldflags=static ./cmd/scale_test_worker
 
-FROM gke.gcr.io/debian-base:bookworm-v1.0.4-gke.17
+FROM gke.gcr.io/debian-base:trixie-v1.0.0-gke.2
 COPY --from=builder /src/scale_test_worker /
 ENTRYPOINT ["/scale_test_worker"]

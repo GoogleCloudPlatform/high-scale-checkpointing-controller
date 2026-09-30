@@ -21,6 +21,6 @@ COPY --from=builder /src/hack/print-missing-deps.sh /print-missing-deps.sh
 COPY --from=builder /src/multitier_controller_executable /multitier_controller_executable
 RUN /print-missing-deps.sh
 
-FROM gcr.io/distroless/base-debian12 AS distroless
+FROM gcr.io/distroless/base-debian13 AS distroless
 COPY --from=check /multitier_controller_executable /multitier_controller_executable
 ENTRYPOINT ["/multitier_controller_executable"]

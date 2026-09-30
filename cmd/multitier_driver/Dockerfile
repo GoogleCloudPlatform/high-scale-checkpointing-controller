@@ -7,7 +7,7 @@
 
 ARG VERSION
 
-FROM gke.gcr.io/debian-base:bookworm-v1.0.6-gke.2@sha256:14264b090b8f98d640e59c85496947061ca68c00fbb092e4a3ce8e42e6ec1cef AS debian
+FROM gke.gcr.io/debian-base:trixie-v1.0.0-gke.2@sha256:9cf5515a7e60a2a0ac33f4de3e43148ed9bdd5c5911f8aa68d0253a8d28e2a68 AS debian
 # Note that netbase is needed to get rpcbind working correctly.
 RUN clean-install \
   mount bash nfs-common netbase

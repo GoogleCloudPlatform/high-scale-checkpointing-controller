@@ -9,7 +9,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
     ./cmd/multitier_stub
 
-FROM gke.gcr.io/debian-base:bookworm-v1.0.4-gke.17 AS debian
+FROM gke.gcr.io/debian-base:trixie-v1.0.0-gke.2 AS debian
 RUN clean-install \
   bash \
   procps file xxd lsof iputils-ping dnsutils iproute2 iptables # all for debugging
