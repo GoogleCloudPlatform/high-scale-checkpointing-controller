@@ -42,7 +42,7 @@ import (
 	"google.golang.org/grpc/balancer/lazy"
 	"google.golang.org/grpc/balancer/pickfirst"
 	"google.golang.org/grpc/connectivity"
-	"google.golang.org/grpc/internal/balancer/weight"
+	"google.golang.org/grpc/experimental/balancer/weight"
 	"google.golang.org/grpc/internal/grpclog"
 	"google.golang.org/grpc/internal/pretty"
 	iringhash "google.golang.org/grpc/internal/ringhash"
@@ -142,10 +142,10 @@ func (b *ringhashBalancer) UpdateState(state balancer.State) {
 		es, ok := b.endpointStates.Get(endpoint)
 		if !ok {
 			es := &endpointState{
-				balancer: childState.Balancer,
 				hashKey:  hk,
 				weight:   newWeight,
 				state:    childState.State,
+				exitIdle: childState.ExitIdle,
 			}
 			b.endpointStates.Set(endpoint, es)
 			b.shouldRegenerateRing = true
@@ -166,7 +166,7 @@ func (b *ringhashBalancer) UpdateState(state balancer.State) {
 		}
 	}
 
-	for _, endpoint := range b.endpointStates.Keys() {
+	for endpoint := range b.endpointStates.All() {
 		if _, ok := endpointsSet.Get(endpoint); ok {
 			continue
 		}
@@ -261,26 +261,28 @@ func (b *ringhashBalancer) updatePickerLocked() {
 		// non-deterministic, the list of `endpointState`s must be sorted to
 		// ensure `ExitIdle` is called on the same child, preventing unnecessary
 		// connections.
-		var endpointStates = make([]*endpointState, b.endpointStates.Len())
-		for i, s := range b.endpointStates.Values() {
-			endpointStates[i] = s
+		endpointStates := make([]*endpointState, 0, b.endpointStates.Len())
+		for _, s := range b.endpointStates.All() {
+			endpointStates = append(endpointStates, s)
 		}
 		sort.Slice(endpointStates, func(i, j int) bool {
 			return endpointStates[i].hashKey < endpointStates[j].hashKey
 		})
-		var idleBalancer endpointsharding.ExitIdler
+
+		// Store the function to ExitIdle on the first IDLE endpoint.
+		var exitIdle func()
 		for _, es := range endpointStates {
 			connState := es.state.ConnectivityState
 			if connState == connectivity.Connecting {
-				idleBalancer = nil
+				exitIdle = nil
 				break
 			}
-			if idleBalancer == nil && connState == connectivity.Idle {
-				idleBalancer = es.balancer
+			if exitIdle == nil && connState == connectivity.Idle {
+				exitIdle = es.exitIdle
 			}
 		}
-		if idleBalancer != nil {
-			idleBalancer.ExitIdle()
+		if exitIdle != nil {
+			exitIdle()
 		}
 	}
 
@@ -322,7 +324,7 @@ func (b *ringhashBalancer) ExitIdle() {
 func (b *ringhashBalancer) newPickerLocked() *picker {
 	states := make(map[string]endpointState)
 	hasEndpointConnecting := false
-	for _, epState := range b.endpointStates.Values() {
+	for _, epState := range b.endpointStates.All() {
 		// Copy the endpoint state to avoid races, since ring hash
 		// mutates the state, weight and hash key in place.
 		states[epState.hashKey] = *epState
@@ -356,7 +358,7 @@ func (b *ringhashBalancer) newPickerLocked() *picker {
 // failure to failover to the lower priority.
 func (b *ringhashBalancer) aggregatedStateLocked() connectivity.State {
 	var nums [5]int
-	for _, es := range b.endpointStates.Values() {
+	for _, es := range b.endpointStates.All() {
 		nums[es.state.ConnectivityState]++
 	}
 
@@ -399,7 +401,7 @@ type endpointState struct {
 	// overridden, for example based on EDS endpoint metadata.
 	hashKey  string
 	weight   uint32
-	balancer endpointsharding.ExitIdler
+	exitIdle func()
 
 	// state is updated by the balancer while receiving resolver updates from
 	// the channel and picker updates from its children. Access to it is guarded

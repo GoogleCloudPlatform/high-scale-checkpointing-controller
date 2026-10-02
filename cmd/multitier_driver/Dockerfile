@@ -12,7 +12,7 @@ FROM gke.gcr.io/debian-base:trixie-v1.0.0-gke.2@sha256:9cf5515a7e60a2a0ac33f4de3
 RUN clean-install \
   mount bash nfs-common netbase
 
-FROM --platform=$BUILDPLATFORM google-go.pkg.dev/golang:1.25.5@sha256:b9b992fbef86e816ebac77aa06d28a5c92c6619cc0ed3548df91cccf3328e9ca AS builder
+FROM --platform=$BUILDPLATFORM google-go.pkg.dev/golang:1.27.1@sha256:839dafae523554ce25f90b48dae988215e8fed7c8a3c6e0577fec4b847d7e41e AS builder
 
 ARG TARGETOS
 ARG TARGETARCH
