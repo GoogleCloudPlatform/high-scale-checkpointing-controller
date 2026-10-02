@@ -111,14 +111,15 @@ scale-test:
 dump-vars:
 	@echo PROJECT=$(PROJECT)
 	@echo REPO_HOST=$(REPO_HOST)
+	@echo REPO_PATH=$(REPO_PATH)
 
 # Hints for the emulated test:
 #
 # The worker can be made from the root of the checkpoint-replicator repo with:
 #   TAG=0227-1130; \
 #   docker build --file test/test-deploy/k8s/fake-ml-job/fake-ml-model.dockerfile \
-#     -t $(REPO_HOST)/emulated-worker:$TAG . && \
-#   docker push $(REPO_HOST)/emulated-worker:$TAG
+#     -t ${REPO_PATH}/emulated-worker:$TAG --progress=plain . && \
+#   docker push ${REPO_PATH}/emulated-worker:$TAG
 
 # Set this to `true` if your cluster is a release channel. The test will not disable
 # auto-update on nodepools in that case. This will make the tests less stable -- if an

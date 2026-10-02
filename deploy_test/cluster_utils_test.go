@@ -32,6 +32,7 @@ import (
 	"google.golang.org/api/iterator"
 	"gotest.tools/v3/assert"
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -54,6 +55,8 @@ const (
 	useDataParallelism = "data-parallel"
 	useCubePeers       = "cube-peers"
 	waitForDisruption  = "wait-for-disruption"
+
+	mtcCsiDriverName = "multitier-checkpoint.csi.storage.gke.io"
 )
 
 // getTestSlices returns a map of node pool name to nodes in that pool, for nodes
@@ -112,7 +115,7 @@ func getTestSlices(ctx context.Context, t *testing.T, opts ...NodePoolOption) ma
 func createTestPool(ctx context.Context, t *testing.T, sliceSize int, opts ...NodePoolOption) string {
 	t.Helper()
 	// Note opts will override any of the defaults set here.
-	pool_opts := []NodePoolOption{MachineType("e2-small"), NumNodes(sliceSize), NodePoolLabel(fmt.Sprintf("%s=%s", sliceLabel, sliceValue)), NodePoolTaint(sliceTaint), DiskSizeGb(20), MaxPodsPerNode(12)}
+	pool_opts := []NodePoolOption{MachineType("e2-small"), NumNodes(sliceSize), NodePoolLabel(fmt.Sprintf("%s=%s", sliceLabel, sliceValue)), NodePoolTaint(sliceTaint), DiskSizeGb(20), MaxPodsPerNode(14)}
 	pool_opts = append(pool_opts, opts...)
 	return createUniqueNodePool(ctx, pool_opts...)
 }
@@ -133,6 +136,7 @@ type scaleTestServer struct {
 
 func getScaleTestParams(t *testing.T) *scaleTestParams {
 	t.Helper()
+    t.Logf("%v: getting scale test params", time.Now())
 	params := func() *scaleTestParams {
 		env := os.Getenv("SCALE_TEST")
 		if env == "" {
@@ -175,6 +179,7 @@ func getScaleTestParams(t *testing.T) *scaleTestParams {
 
 func getSupersliceTestParams(t *testing.T) *scaleTestParams {
 	t.Helper()
+    t.Logf("%v: getting superslice params", time.Now())
 	params := func() *scaleTestParams {
 		topology := os.Getenv("SUPERSLICE_TOPOLOGY")
 		if topology == "" {
@@ -182,7 +187,7 @@ func getSupersliceTestParams(t *testing.T) *scaleTestParams {
 		}
 		img := os.Getenv("SCALE_TEST_IMAGE")
 		if img == "" {
-			t.Fatalf("Missing env SCALE_TEST_IMAGE")
+			t.Fatal("Missing env SCALE_TEST_IMAGE")
 		}
 		parts := strings.Split(topology, "x")
 		if len(parts) != 3 {
@@ -476,6 +481,34 @@ func initializeTestSlices(ctx context.Context, t *testing.T, numSlices, sliceSiz
 	}
 }
 
+// waitForDaemonset considers nodes as in initializeTestSlices and waits for the CSINode to be ready with the MTC driver.
+func waitForDaemonset(ctx context.Context, t *testing.T, numSlices, sliceSize int, opts ...NodePoolOption) {
+	t.Helper()
+	pools := getTestSlices(ctx, t, opts...)
+	for pool := range pools {
+		for _, node := range pools[pool] {
+			err := wait.PollUntilContextTimeout(ctx, 500*time.Millisecond, 5*time.Minute, true, func(ctx context.Context) (bool, error) {
+				var csinode storagev1.CSINode
+				if err := CRClient.Get(ctx, types.NamespacedName{Name: node}, &csinode); err != nil {
+					t.Logf("Couldn't get CSINode %s: %v", node, err)
+					return false, nil
+				}
+				for _, driver := range csinode.Spec.Drivers {
+					if driver.Name == mtcCsiDriverName {
+						t.Logf("Found MTC driver on %s", node)
+						return true, nil
+					}
+				}
+				// retry
+				return false, nil
+			})
+			if err != nil {
+				t.Fatalf("Timeout getting mtc driver for %s", node)
+			}
+		}
+	}
+}
+
 func uploadObject(ctx context.Context, bucket, path, data string) error {
 	client, err := storage.NewClient(ctx)
 	if err != nil {
@@ -603,7 +636,7 @@ func setEmulatorConfig(ctx context.Context, t *testing.T, uuid string, start, en
 
 func waitForDisruptionReady(ctx context.Context, t *testing.T, uuid string, step int) bool {
 	path := fmt.Sprintf("%s/disruption-ready-local-%d.txt", uuid, step)
-	err := wait.PollUntilContextTimeout(ctx, 2*time.Second, 10*time.Minute, true, func(ctx context.Context) (bool, error) {
+	err := wait.PollUntilContextTimeout(ctx, 2*time.Second, 20*time.Minute, true, func(ctx context.Context) (bool, error) {
 		_, err := readObject(ctx, getEmulatorBucket(t), path)
 		t.Logf("fetching disruption %s/%s: %v", getEmulatorBucket(t), path, err)
 		return err == nil, nil

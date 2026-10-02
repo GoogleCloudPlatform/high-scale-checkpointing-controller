@@ -23,6 +23,7 @@ import (
 	"gotest.tools/v3/assert"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	jobsetv1alpha "sigs.k8s.io/jobset/api/jobset/v1alpha2"
@@ -30,10 +31,10 @@ import (
 
 var (
 	supersliceNodePoolOpts = []NodePoolOption{
-		MachineType("n2-standard-4"),
+		MachineType("e2-standard-2"),
 		DiskSizeGb(50),
 		NodePoolLabel("cloud.google.com/gke-tpu-accelerator=tpu7x"),
-		MaxPodsPerNode(14), // the tpu7x label makes some tpu driver pods get added to the node.
+		MaxPodsPerNode(18), // the tpu7x label makes some tpu driver pods get added to the node.
 	}
 )
 
@@ -199,8 +200,22 @@ func createSupersliceJobsetSpec(t *testing.T, name string, selector map[string]s
 	return jobset
 }
 
+func cleanPreviousJobset(ctx context.Context, t *testing.T, name string) {
+	t.Helper()
+	err := CRClient.Delete(ctx, &jobsetv1alpha.JobSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: testNamespace,
+		},
+	})
+	if err != nil && !apierrors.IsNotFound(err) {
+		t.Fatalf("Cannot cleanup previous jobset %s/%s: %v", testNamespace, name, err)
+	}
+}
+
 func createSupersliceJobset(ctx context.Context, t *testing.T, name string, selector map[string]string) *jobsetv1alpha.JobSet {
 	t.Helper()
+	cleanPreviousJobset(ctx, t, name)
 	jobset := createSupersliceJobsetSpec(t, name, selector)
 	err := CRClient.Create(ctx, jobset)
 	assert.NilError(t, err, "cannot create jobset %s", name)
@@ -210,6 +225,8 @@ func createSupersliceJobset(ctx context.Context, t *testing.T, name string, sele
 
 func createTwoWorkerSupersliceJobset(ctx context.Context, t *testing.T, name string, selector map[string]string) *jobsetv1alpha.JobSet {
 	t.Helper()
+	cleanPreviousJobset(ctx, t, name)
+
 	jobset := createSupersliceJobsetSpec(t, name, selector)
 
 	podSpec := &jobset.Spec.ReplicatedJobs[0].Template.Spec.Template.Spec
@@ -254,6 +271,8 @@ func TestSupersliceDataParallel(t *testing.T) {
 	selector := getMultitierSelector(ctx, t)
 
 	setEmulatorConfig(ctx, t, uuid, 0, 4, waitForDisruption)
+
+	waitForDaemonset(ctx, t, params.slices, params.nodesPerSlice, supersliceNodePoolOpts...)
 
 	jobset := createSupersliceJobset(ctx, t, uuid, selector)
 	defer cleanupJobset(ctx, t, jobset.GetNamespace(), jobset.GetName())
@@ -300,6 +319,8 @@ func TestSupersliceTwoWorker(t *testing.T) {
 	selector := getMultitierSelector(ctx, t)
 
 	setEmulatorConfig(ctx, t, uuid, 0, 4, waitForDisruption)
+
+	waitForDaemonset(ctx, t, params.slices, params.nodesPerSlice, supersliceNodePoolOpts...)
 
 	jobset := createTwoWorkerSupersliceJobset(ctx, t, uuid, selector)
 	defer cleanupJobset(ctx, t, jobset.GetNamespace(), jobset.GetName())

@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,8 +28,10 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
@@ -44,7 +47,20 @@ const (
 	backoffMax   = 10 * time.Second
 	pendingDelay = 2 * time.Second
 
-	updateDelay = 5 * time.Millisecond
+	updateBaseMs = 5
+	updateMaxMs  = 500
+
+	clientBackoffMaxDelay = 5 * time.Second
+
+	// updateTimeout is used both with a context around the update
+	// call and in the gRPC params. This is probably redundant but
+	// seems harmless?
+	updateTimeout = 5 * time.Second
+
+	// keepaliveTimeUntilPing and other keepalive parameters let detect
+	// when the update channel has stalled and reconnect faster.
+	keepaliveTimeUntilPing  = 10 * time.Second
+	keepalivePingAckTimeout = 3 * time.Second
 )
 
 type RanksClientOpts struct {
@@ -106,8 +122,24 @@ var _ RanksClient = &ranksClient{}
 var _ clientSyncer = &ranksClient{}
 
 func NewRanksClient(opts RanksClientOpts) (RanksClient, error) {
+	backoffCfg := backoff.DefaultConfig
+	backoffCfg.MaxDelay = clientBackoffMaxDelay
+
 	// TODO: figure out better credentials.
-	conn, err := grpc.Dial(opts.ServerTarget, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.Dial(
+		opts.ServerTarget,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithConnectParams(grpc.ConnectParams{
+			Backoff:           backoffCfg,
+			MinConnectTimeout: updateTimeout,
+		}),
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{
+			Time:    keepaliveTimeUntilPing,
+			Timeout: keepalivePingAckTimeout,
+			// don't continue pinging after we've gotten our rank
+			PermitWithoutStream: false,
+		}),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -140,6 +172,12 @@ func newRanksAssigningUpdater(api proto.RanksServiceClient, syncer clientSyncer,
 		syncer: syncer,
 		mm:     mManager,
 	}
+}
+
+func (r *ranksAssigningUpdater) updateWithTimeout(ctx context.Context, req *proto.UpdateRequest, timeout time.Duration) (*proto.UpdateResponse, error) {
+	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return r.api.Update(timeoutCtx, req)
 }
 
 func (r *ranksClient) NewMount(ctx context.Context, podUID types.UID) error {
@@ -314,15 +352,20 @@ func (r *ranksAssigningUpdater) updateLoop(ctx context.Context) error {
 	var lastPendingLog time.Time
 
 	for {
-		rsp, err := r.api.Update(ctx, &proto.UpdateRequest{
+		// Use a short timeout to avoid long delays between retries
+		rsp, err := r.updateWithTimeout(ctx, &proto.UpdateRequest{
 			State:       r.state.State,
 			Node:        r.state.Node,
 			PodUid:      string(r.state.PodUID),
 			Rank:        int32(r.state.Rank),
 			Jobset:      r.state.Jobset,
 			JobsetShape: r.state.JobsetShape,
-		})
+		}, updateTimeout)
 		if err != nil {
+			if ctx.Err() != nil {
+				klog.Errorf("exiting update due to global context error: %v (%v)", ctx.Err(), err)
+				return err
+			}
 			if status, ok := status.FromError(err); ok {
 				switch status.Code() {
 				case codes.Canceled:
@@ -334,7 +377,7 @@ func (r *ranksAssigningUpdater) updateLoop(ctx context.Context) error {
 					continue
 				}
 			}
-			if strings.Contains("Error while dialing", err.Error()) {
+			if strings.Contains(err.Error(), "Error while dialing") {
 				klog.Warningf("retriable dial error, retrying: %v", err)
 				backoffSleep()
 				continue
@@ -359,7 +402,8 @@ func (r *ranksAssigningUpdater) updateLoop(ctx context.Context) error {
 			return err
 		}
 		backoff = backoffStart
-		time.Sleep(updateDelay)
+		updateDelayMs := updateBaseMs + rand.IntN(updateMaxMs)
+		time.Sleep(time.Duration(updateDelayMs) * time.Millisecond)
 	}
 }
 

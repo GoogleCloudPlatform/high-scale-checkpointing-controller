@@ -86,7 +86,7 @@ webhook (it needs 500m cores, or 1 if doing scale tests); e2-standard-4 should
 be used instead.
 
 ```
-kubectl apply --server-side -f https://github.com/kubernetes-sigs/jobset/releases/download/v0.11.1/manifests.yaml
+kubectl apply --server-side -f https://github.com/kubernetes-sigs/jobset/releases/download/v0.12.0/manifests.yaml
 ```
 
 If running scale tests on more than 10s of nodes, the jobset memory needs to be
