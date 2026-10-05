@@ -196,11 +196,24 @@ func (r *replicationServer) UnregisterCoordinator(ctx context.Context, req *prot
 	}
 	configMap.Data[coordinatorAddressKey] = ""
 
-	if _, err := r.kubeClient.CoreV1().ConfigMaps(r.opts.Namespace).Update(ctx, configMap, metav1.UpdateOptions{}); err != nil {
-		if k8serrors.IsConflict(err) {
-			// Conflict, do nothing
-			return &proto.UnregisterCoordinatorResponse{}, nil
+	// Update the configmap, ignoring any conflicts. If there was a conflict it could be a
+	// new coordinator getting created, which we don't want to clobber.
+	if err := wait.PollUntilContextTimeout(ctx, time.Second, 30*time.Second, true, func(ctx context.Context) (bool, error) {
+		updated, err := r.kubeClient.CoreV1().ConfigMaps(r.opts.Namespace).Update(ctx, configMap, metav1.UpdateOptions{})
+		if isTransientKubeError(err) {
+			return false, nil // retry
 		}
+		if k8serrors.IsConflict(err) {
+			klog.Warningf("ignored configmap conflict on deregister of %s", req.JobName)
+			return true, nil // no error
+		}
+		// Ensure the cache is updated, in case we're called before the watcher has a chance to update.
+		if err == nil {
+			_ = r.configMapInformer.Informer().GetStore().Update(updated)
+			r.raiseWatcherFlag()
+		}
+		return true, err
+	}); err != nil {
 		return nil, status.Errorf(codes.Unavailable, "%v", err)
 	}
 
@@ -284,56 +297,79 @@ func (r *replicationServer) RegisterCoordinator(ctx context.Context, req *proto.
 					Name:      req.JobName,
 					Namespace: r.opts.Namespace,
 					Annotations: map[string]string{
-						util.CpcAnnotation: r.opts.CpcName,
+						util.CpcAnnotation:        r.opts.CpcName,
+						coordinatorUpdateStaleKey: fmt.Sprintf("%d", time.Now().Unix()),
 					},
 				},
 			}
 		}
 	}
-	if configMap.Data == nil {
-		configMap.Data = map[string]string{}
-	}
-	configMap.Data[coordinatorAddressKey] = req.Ip
-	annotations := configMap.GetObjectMeta().GetAnnotations()
-	if annotations == nil {
-		annotations = map[string]string{}
-	}
-	annotations[coordinatorUpdateStaleKey] = fmt.Sprintf("%d", time.Now().Unix())
-	configMap.GetObjectMeta().SetAnnotations(annotations)
 
 	if needCreate {
 		klog.Infof("coordinator info for job %q not found, creating %v", req.JobName, configMap)
-		if _, err := r.kubeClient.CoreV1().ConfigMaps(r.opts.Namespace).Create(ctx, configMap, metav1.CreateOptions{}); err != nil {
-			return nil, status.Errorf(codes.Internal, "creating configmap: %v", err)
-		}
-	} else if err := wait.PollImmediateWithContext(ctx, time.Second, 30*time.Second, func(ctx context.Context) (bool, error) {
-		var err error
-		configMap, err = r.kubeClient.CoreV1().ConfigMaps(r.opts.Namespace).Update(ctx, configMap, metav1.UpdateOptions{})
-		if k8serrors.IsConflict(err) {
-			klog.Infof("coordinator info update conflicted, retrying...")
-			configMap, err = r.getCoordinatorConfigMapFromKubeAPI(ctx, req.JobName)
-			if err != nil {
-				klog.Infof("(retrying) error fetching up-to-date configmap %q from API server: %v", req.JobName, err)
+		configMap.Data = map[string]string{coordinatorAddressKey: req.Ip}
+		var created *corev1.ConfigMap
+		err := wait.PollUntilContextTimeout(ctx, time.Second, 30*time.Second, true, func(ctx context.Context) (bool, error) {
+			var err error
+			created, err = r.kubeClient.CoreV1().ConfigMaps(r.opts.Namespace).Create(ctx, configMap, metav1.CreateOptions{})
+			if isTransientKubeError(err) {
 				return false, nil // retry
 			}
-			if configMap == nil {
-				// this shouldn't really happen. weird stuff is going on if this happens.
-				return false, status.Errorf(codes.Unavailable, "configMap %q not found after update conflict, please retry: %v", req.JobName, err)
-			}
-			if configMap.Data == nil {
-				configMap.Data = map[string]string{}
-			}
-			configMap.Data[coordinatorAddressKey] = req.Ip
-			return false, nil // retry
-		} else if err != nil {
-			return false, status.Errorf(codes.Internal, "Unknown configmap update error: %v", err)
+			return true, err
+		})
+		if err == nil {
+			_ = r.configMapInformer.Informer().GetStore().Update(created)
+			r.raiseWatcherFlag()
+			return &proto.RegisterCoordinatorResponse{}, nil // success
+		} else if !k8serrors.IsAlreadyExists(err) {
+			return nil, status.Errorf(codes.Internal, "creating configmap: %v", err)
 		}
-		return true, nil
-	}); err != nil {
+		// Otherwise we had a dropped connection or something during the create that
+		// raced with another create; fall through to the update call.
+	}
+
+	if err := r.updateCoordinatorMap(ctx, req.JobName, req.Ip, configMap); err != nil {
 		return nil, status.Errorf(codes.Internal, "updating configmap %v: %v", configMap, err)
 	}
 
 	return &proto.RegisterCoordinatorResponse{}, nil
+}
+
+func (r *replicationServer) updateCoordinatorMap(ctx context.Context, job, ip string, configMap *corev1.ConfigMap) error {
+	return wait.PollUntilContextTimeout(ctx, time.Second, 30*time.Second, true, func(ctx context.Context) (bool, error) {
+		annotations := configMap.GetObjectMeta().GetAnnotations()
+		if annotations == nil {
+			annotations = map[string]string{}
+		}
+		annotations[coordinatorUpdateStaleKey] = fmt.Sprintf("%d", time.Now().Unix())
+		configMap.GetObjectMeta().SetAnnotations(annotations)
+		if configMap.Data == nil {
+			configMap.Data = map[string]string{}
+		}
+		configMap.Data[coordinatorAddressKey] = ip
+		updated, err := r.kubeClient.CoreV1().ConfigMaps(r.opts.Namespace).Update(ctx, configMap, metav1.UpdateOptions{})
+		if k8serrors.IsConflict(err) {
+			klog.Infof("coordinator info update conflicted, retrying...")
+			updatedMap, err := r.getCoordinatorConfigMapFromKubeAPI(ctx, job)
+			if err != nil {
+				klog.Infof("(retrying) error fetching up-to-date configmap %q from API server: %v", job, err)
+				return false, nil // retry; any transient errors will be tried again
+			}
+			if updatedMap == nil {
+				// this shouldn't really happen. weird stuff is going on if this happens.
+				return false, fmt.Errorf("configMap %q not found after update conflict: %v", job, err)
+			}
+			configMap = updatedMap // pick up the conflict. Will update IP etc on retry.
+			return false, nil      // retry
+		} else if isTransientKubeError(err) {
+			return false, nil // retry
+		} else if err != nil {
+			return false, fmt.Errorf("Unknown configmap update error: %v", err)
+		}
+		_ = r.configMapInformer.Informer().GetStore().Update(updated)
+		r.raiseWatcherFlag()
+		return true, nil
+	})
 }
 
 // getCoordinatorConfigMapFromKubeAPI looks for a job configmap from the API server and returns one, or nil if not found.
@@ -342,7 +378,19 @@ func (r *replicationServer) RegisterCoordinator(ctx context.Context, req *proto.
 // The key difference between this function and queryCoordinatorConfigMap is this function hits the Kube
 // API server directly and should only be used if the most up-to-date state is required.
 func (r *replicationServer) getCoordinatorConfigMapFromKubeAPI(ctx context.Context, job string) (*corev1.ConfigMap, error) {
-	configMap, err := r.kubeClient.CoreV1().ConfigMaps(r.opts.Namespace).Get(ctx, job, metav1.GetOptions{})
+	var configMap *corev1.ConfigMap
+	err := wait.PollUntilContextTimeout(ctx, time.Second, 30*time.Second, true, func(ctx context.Context) (bool, error) {
+		var err error
+		configMap, err = r.kubeClient.CoreV1().ConfigMaps(r.opts.Namespace).Get(ctx, job, metav1.GetOptions{})
+		if k8serrors.IsNotFound(err) {
+			return true, err
+		}
+		if isTransientKubeError(err) {
+			return false, nil // retry
+		}
+		return true, err // all done, either success or terminal error
+	})
+
 	if k8serrors.IsNotFound(err) {
 		return nil, nil
 	} else if err != nil {
@@ -535,8 +583,9 @@ func configMapIsFresh(configMap *corev1.ConfigMap) bool {
 	return true
 }
 
-// queryCoordinatorConfigMap looks for a job configmap and returns one, or nil if not found.
-// An error is returned only on a non-retriable error (eg, timeout).
+// queryCoordinatorConfigMap looks for a job configmap in the informer cache and returns
+// one, or nil if not found.  An error is returned only on a non-retriable error (eg,
+// timeout -- this is handled inside the informer cache so is not done explicitly here).
 func (r *replicationServer) queryCoordinatorConfigMap(ctx context.Context, job string) (*corev1.ConfigMap, error) {
 	configMap, err := r.configMapLister.ConfigMaps(r.opts.Namespace).Get(job)
 	if k8serrors.IsNotFound(err) {
@@ -544,7 +593,7 @@ func (r *replicationServer) queryCoordinatorConfigMap(ctx context.Context, job s
 	} else if err != nil {
 		return nil, err
 	}
-	return configMap, nil
+	return configMap.DeepCopy(), nil // return a copy so that the informer cache isn't modified.
 }
 
 func (r *replicationServer) waitForWatcher(ctx context.Context) error {

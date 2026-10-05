@@ -18,6 +18,8 @@ import (
 	"context"
 
 	"google.golang.org/grpc"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	utilnet "k8s.io/apimachinery/pkg/util/net"
 
 	"gke-internal.googlesource.com/gke-storage/high-scale-checkpointing/pkg/metrics"
 )
@@ -37,4 +39,27 @@ func cappedLatencyInterceptor(mm metrics.MetricsManager) grpc.UnaryServerInterce
 
 		return resp, err
 	}
+}
+
+func isTransientKubeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Transport / connection errors (same checks client-go uses for GET retries, plus timeout/refused):
+	if utilnet.IsHTTP2ConnectionLost(err) || // matches "http2: client connection lost"
+		utilnet.IsProbableEOF(err) || // EOF, ErrUnexpectedEOF, GOAWAY, broken connection, closed network conn
+		utilnet.IsConnectionReset(err) || // ECONNRESET ("connection reset by peer")
+		utilnet.IsConnectionRefused(err) || // ECONNREFUSED
+		utilnet.IsTimeout(err) { // net.Error Timeout()
+		return true
+	}
+	// Transient API server status errors (500, 503, 504, 429):
+	if k8serrors.IsInternalError(err) ||
+		k8serrors.IsServiceUnavailable(err) ||
+		k8serrors.IsServerTimeout(err) ||
+		k8serrors.IsTimeout(err) ||
+		k8serrors.IsTooManyRequests(err) {
+		return true
+	}
+	return false
 }

@@ -18,8 +18,13 @@ package replication
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -42,9 +47,32 @@ const (
 	replicatorNamespace = "replication"
 )
 
+type faultInjector struct {
+	mu      sync.Mutex
+	hook    func(req *http.Request, rt http.RoundTripper) (*http.Response, error)
+	wrapped http.RoundTripper
+}
+
+func (f *faultInjector) RoundTrip(req *http.Request) (*http.Response, error) {
+	f.mu.Lock()
+	hook := f.hook
+	f.mu.Unlock()
+	if hook != nil && strings.Contains(req.URL.Path, "/configmaps") {
+		return hook(req, f.wrapped)
+	}
+	return f.wrapped.RoundTrip(req)
+}
+
+func (f *faultInjector) setHook(h func(req *http.Request, rt http.RoundTripper) (*http.Response, error)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hook = h
+}
+
 var (
 	kubeClient *kubernetes.Clientset
 	server     ReplicationServer
+	injector   *faultInjector
 	rBaseDir   string
 	pBaseDir   string
 )
@@ -70,6 +98,12 @@ func mustSetupCluster(t *testing.T) (context.Context, func(ctx context.Context))
 	if err != nil {
 		t.Fatalf("cannot start testenv: %v", err)
 	}
+
+	injector = &faultInjector{}
+	testCfg.Wrap(func(rt http.RoundTripper) http.RoundTripper {
+		injector.wrapped = rt
+		return injector
+	})
 
 	kubeClient, err = kubernetes.NewForConfig(testCfg)
 	if err != nil {
@@ -259,4 +293,89 @@ func TestCoordinatorMissingAnnotations(t *testing.T) {
 	_, err = server.RegisterCoordinator(ctx, &proto.RegisterCoordinatorRequest{JobName: "job", Ip: "10.0.0.2"})
 	assert.NilError(t, err)
 	assert.Equal(t, <-delayedGet, "10.0.0.2") // "unknown.ip.address.net" means we fetched the stale one.
+}
+
+func TestCoordinatorTransientErrorsAndCreateDrop(t *testing.T) {
+	ctx, cleanup := mustSetupCluster(t)
+	defer cleanup(ctx)
+
+	// 1. Simulate Create succeeding on server, but connection dropping before response arrives.
+	var createCalls atomic.Int32
+	injector.setHook(func(req *http.Request, rt http.RoundTripper) (*http.Response, error) {
+		if req.Method == http.MethodPost && createCalls.Add(1) == 1 {
+			resp, err := rt.RoundTrip(req)
+			if resp != nil {
+				resp.Body.Close()
+			}
+			return nil, fmt.Errorf("http2: client connection lost (post-create, err=%v)", err)
+		}
+		return rt.RoundTrip(req)
+	})
+
+	_, err := server.RegisterCoordinator(ctx, &proto.RegisterCoordinatorRequest{JobName: "job", Ip: "10.0.0.1"})
+	assert.NilError(t, err)
+	assert.Assert(t, createCalls.Load() >= 2)
+	rsp, err := server.GetCoordinator(ctx, &proto.GetCoordinatorRequest{JobName: "job"})
+	assert.NilError(t, err)
+	assert.Equal(t, rsp.Ip, "10.0.0.1")
+
+	// 2. Simulate transient connection loss on Update during RegisterCoordinator.
+	var putCalls atomic.Int32
+	injector.setHook(func(req *http.Request, rt http.RoundTripper) (*http.Response, error) {
+		if req.Method == http.MethodPut && putCalls.Add(1) == 1 {
+			return nil, errors.New("http2: client connection lost")
+		}
+		return rt.RoundTrip(req)
+	})
+
+	_, err = server.RegisterCoordinator(ctx, &proto.RegisterCoordinatorRequest{JobName: "job", Ip: "10.0.0.2"})
+	assert.NilError(t, err)
+	assert.Assert(t, putCalls.Load() >= 2)
+	rsp, err = server.GetCoordinator(ctx, &proto.GetCoordinatorRequest{JobName: "job"})
+	assert.NilError(t, err)
+	assert.Equal(t, rsp.Ip, "10.0.0.2")
+
+	// 3. Simulate transient connection loss on Update during UnregisterCoordinator.
+	putCalls.Store(0)
+	_, err = server.UnregisterCoordinator(ctx, &proto.UnregisterCoordinatorRequest{JobName: "job", Ip: "10.0.0.2"})
+	assert.NilError(t, err)
+	assert.Assert(t, putCalls.Load() >= 2)
+	injector.setHook(nil)
+
+	cm, err := kubeClient.CoreV1().ConfigMaps(replicatorNamespace).Get(ctx, "job", metav1.GetOptions{})
+	assert.NilError(t, err)
+	assert.Equal(t, cm.Data[coordinatorAddressKey], "")
+}
+
+func TestCoordinatorUnregisterConflict(t *testing.T) {
+	ctx, cleanup := mustSetupCluster(t)
+	defer cleanup(ctx)
+
+	_, err := server.RegisterCoordinator(ctx, &proto.RegisterCoordinatorRequest{JobName: "job", Ip: "10.0.0.1"})
+	assert.NilError(t, err)
+	rsp, err := server.GetCoordinator(ctx, &proto.GetCoordinatorRequest{JobName: "job"})
+	assert.NilError(t, err)
+	assert.Equal(t, rsp.Ip, "10.0.0.1")
+
+	// Deterministically cause a 409 Conflict when UnregisterCoordinator issues its PUT
+	// by updating the ConfigMap on the API server right before the PUT executes.
+	var putCalls atomic.Int32
+	injector.setHook(func(req *http.Request, rt http.RoundTripper) (*http.Response, error) {
+		if req.Method == http.MethodPut && putCalls.Add(1) == 1 {
+			cm, getErr := kubeClient.CoreV1().ConfigMaps(replicatorNamespace).Get(ctx, "job", metav1.GetOptions{})
+			if getErr == nil {
+				cm.Data[coordinatorAddressKey] = "10.0.0.2"
+				_, _ = kubeClient.CoreV1().ConfigMaps(replicatorNamespace).Update(ctx, cm, metav1.UpdateOptions{})
+			}
+		}
+		return rt.RoundTrip(req)
+	})
+
+	_, err = server.UnregisterCoordinator(ctx, &proto.UnregisterCoordinatorRequest{JobName: "job", Ip: "10.0.0.1"})
+	assert.NilError(t, err)
+	injector.setHook(nil)
+
+	cm, err := kubeClient.CoreV1().ConfigMaps(replicatorNamespace).Get(ctx, "job", metav1.GetOptions{})
+	assert.NilError(t, err)
+	assert.Equal(t, cm.Data[coordinatorAddressKey], "10.0.0.2")
 }
