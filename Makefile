@@ -37,7 +37,7 @@ SCALE_TEST=3x8
 REPLICATION_WORKER_DEBUG_BACKUP=false
 
 # Built from `deploy/repl.dockerfile` in the checkpoint-replicator repo.
-EMULATED_TEST_REPLICATION_WORKER=gcr.io/gke-release/highscalecheckpointing-replicator:v0.1.14-gke.0
+EMULATED_TEST_REPLICATION_WORKER=us-central1-artifactregistry.gcr.io/gke-release/gke-release/highscalecheckpointing-replicator:v0.3.1-gke.0
 # Built from `test/test-deploy/k8s/fake-ml-job/fake-ml-model.dockerfile` in the checkpoint-replicator repo.
 EMULATED_JOB_WORKER=$(REPO_PATH)/emulated-worker
 

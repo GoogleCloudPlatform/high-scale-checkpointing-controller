@@ -136,7 +136,7 @@ type scaleTestServer struct {
 
 func getScaleTestParams(t *testing.T) *scaleTestParams {
 	t.Helper()
-    t.Logf("%v: getting scale test params", time.Now())
+	t.Logf("%v: getting scale test params", time.Now())
 	params := func() *scaleTestParams {
 		env := os.Getenv("SCALE_TEST")
 		if env == "" {
@@ -179,7 +179,7 @@ func getScaleTestParams(t *testing.T) *scaleTestParams {
 
 func getSupersliceTestParams(t *testing.T) *scaleTestParams {
 	t.Helper()
-    t.Logf("%v: getting superslice params", time.Now())
+	t.Logf("%v: getting superslice params", time.Now())
 	params := func() *scaleTestParams {
 		topology := os.Getenv("SUPERSLICE_TOPOLOGY")
 		if topology == "" {
@@ -487,7 +487,7 @@ func waitForDaemonset(ctx context.Context, t *testing.T, numSlices, sliceSize in
 	pools := getTestSlices(ctx, t, opts...)
 	for pool := range pools {
 		for _, node := range pools[pool] {
-			err := wait.PollUntilContextTimeout(ctx, 500*time.Millisecond, 5*time.Minute, true, func(ctx context.Context) (bool, error) {
+			err := wait.PollUntilContextTimeout(ctx, time.Second, 10*time.Minute, true, func(ctx context.Context) (bool, error) {
 				var csinode storagev1.CSINode
 				if err := CRClient.Get(ctx, types.NamespacedName{Name: node}, &csinode); err != nil {
 					t.Logf("Couldn't get CSINode %s: %v", node, err)
