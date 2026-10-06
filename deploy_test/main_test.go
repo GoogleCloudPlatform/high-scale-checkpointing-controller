@@ -133,9 +133,18 @@ func undeployCRD(ctx context.Context, t *testing.T) {
 func deployDir(ctx context.Context, t *testing.T, dir string) {
 	base := repoBase(t)
 	t.Logf("deploying %s", dir)
-	out, err := util.RunCommand("kubectl", "apply", "-k", filepath.Join(base, "deploy", dir))
+	err := wait.PollUntilContextTimeout(ctx, 10*time.Second, 3*time.Minute, true, func(ctx context.Context) (bool, error) {
+		out, err := util.RunCommand("kubectl", "apply", "-k", filepath.Join(base, "deploy", dir))
+		if err != nil && strings.Contains(string(out), "unable to handle the request") {
+			t.Log("retrying deploy")
+			return false, nil
+		}
+		if err != nil {
+			t.Log(string(out))
+		}
+		return true, err
+	})
 	assert.NilError(t, err, "Could not deploy %s", dir)
-	t.Log(string(out))
 }
 
 func undeployDir(ctx context.Context, t *testing.T, dir string) {
