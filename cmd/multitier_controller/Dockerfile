@@ -15,12 +15,6 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
     -o multitier_controller_executable \
     ./cmd/multitier_controller
 
-FROM marketplace.gcr.io/google/debian12 AS check
-WORKDIR /
-COPY --from=builder /src/hack/print-missing-deps.sh /print-missing-deps.sh
+FROM gcr.io/distroless/static-debian13 AS distroless
 COPY --from=builder /src/multitier_controller_executable /multitier_controller_executable
-RUN /print-missing-deps.sh
-
-FROM gcr.io/distroless/base-debian13 AS distroless
-COPY --from=check /multitier_controller_executable /multitier_controller_executable
 ENTRYPOINT ["/multitier_controller_executable"]

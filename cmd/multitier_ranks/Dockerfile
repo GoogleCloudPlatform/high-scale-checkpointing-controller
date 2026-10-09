@@ -13,15 +13,6 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
     -ldflags "-extldflags=static" ./cmd/multitier_ranks
 
 
-FROM marketplace.gcr.io/google/debian12 AS check
+FROM gcr.io/distroless/static-debian13 AS final
 COPY --from=builder /src/multitier_ranks /
-COPY --from=builder /src/hack/print-missing-deps.sh /print-missing-deps.sh
-
-SHELL ["/bin/bash", "-c"]
-COPY --from=builder /src/multitier_ranks /
-RUN /print-missing-deps.sh
-
-FROM gcr.io/distroless/base-debian13 AS final
-COPY --from=check /multitier_ranks /
 ENTRYPOINT ["/multitier_ranks"]
-
