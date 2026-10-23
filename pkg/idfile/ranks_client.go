@@ -293,7 +293,6 @@ func (r *ranksClient) completeState(state driverState) error {
 		return err
 	}
 	klog.Infof("Wrote process info at %s: %s", procfile, contents)
-	r.updater.killCurrentUpdateLoop()
 	return nil
 }
 

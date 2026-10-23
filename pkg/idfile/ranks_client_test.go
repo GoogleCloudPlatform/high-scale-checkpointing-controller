@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -213,7 +214,7 @@ func TestRanksClient(t *testing.T) {
 	assert.NilError(t, err)
 	err = client.completeState(updater.state)
 	assert.NilError(t, err)
-	assert.Assert(t, !updater.loopStarted)
+	assert.Assert(t, updater.loopStarted)
 
 	data, err := ioutil.ReadFile(filepath.Join(opts.IdFileDir, "process-info"))
 	assert.NilError(t, err)
@@ -309,6 +310,52 @@ func TestRanksClientJobsetMismatch(t *testing.T) {
 			t.Logf("finished %s", tc.name)
 		})
 	}
+}
+
+// TestRanksClientCompletesWithoutStall runs the real updater to COMPLETED and
+// checks that a following Unmount doesn't wait on the already-finished update
+// loop. Before b/577104252 was fixed, completeState stopped the loop from inside
+// the loop itself, so Unmount blocked for the 1 minute kill timeout.
+func TestRanksClientCompletesWithoutStall(t *testing.T) {
+	opts, cleanup := setupClientDir(t)
+	defer cleanup()
+	opts.IdFileClientOpts = IdFileClientOpts{NodeName: "node"}
+	opts.ProcessInfoFilename = "process-info"
+	opts.CoordinatorPort = 1234
+
+	reqChan, rspChan, clientApi, shutdown := startTestService(t)
+	defer shutdown()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	client := &ranksClient{api: clientApi, opts: opts}
+	client.updater = newRanksAssigningUpdater(clientApi, client, nil)
+
+	rspChan <- &proto.UpdateResponse{NewState: proto.Lifecycle_ASSIGNED, Rank: 2, ControllerIp: "IP"}
+	assert.NilError(t, client.NewMount(ctx, types.UID("pod-id")))
+	<-reqChan
+	rspChan <- &proto.UpdateResponse{NewState: proto.Lifecycle_COMPLETED, Rank: 2, ControllerIp: "IP"}
+	<-reqChan
+
+	procfile := filepath.Join(opts.IdFileDir, "process-info")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(procfile); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("process-info not written")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	rspChan <- &proto.UpdateResponse{}
+	start := time.Now()
+	client.Unmount(ctx, types.UID("pod-id"))
+	elapsed := time.Since(start)
+	req := <-reqChan
+	assert.Equal(t, req.State, proto.Lifecycle_SHUTDOWN)
+	assert.Assert(t, elapsed < 5*time.Second, "Unmount blocked for %v after COMPLETED", elapsed)
 }
 
 // todo: test recovery from gRPC errors in update loop and mismatched id on unmount.
