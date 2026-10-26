@@ -277,7 +277,16 @@ func (p *preparer) prepareRegistrarContainer() corev1.Container {
 				corev1.ResourceMemory: resource.MustParse("10Mi"),
 			},
 			Limits: corev1.ResourceList{
-				corev1.ResourceMemory: resource.MustParse("50Mi"),
+				corev1.ResourceMemory: resource.MustParse("100Mi"),
+			},
+		},
+		Env: []corev1.EnvVar{
+			{
+				// The registrar is mostly idle. Without this, the Go runtime
+				// sizes itself to the host core count, which inflates memory
+				// usage on large nodes (b/574002191).
+				Name:  "GOMAXPROCS",
+				Value: "1",
 			},
 		},
 		VolumeMounts: []corev1.VolumeMount{
@@ -580,7 +589,7 @@ func (p *preparer) prepareMetricsCollectorContainer() corev1.Container {
 		},
 		Resources: corev1.ResourceRequirements{
 			Limits: corev1.ResourceList{
-				corev1.ResourceMemory: resource.MustParse("45Mi"),
+				corev1.ResourceMemory: resource.MustParse("100Mi"),
 			},
 			Requests: corev1.ResourceList{
 				corev1.ResourceCPU:    resource.MustParse("10m"),
@@ -595,6 +604,13 @@ func (p *preparer) prepareMetricsCollectorContainer() corev1.Container {
 			{
 				Name:  "SPLIT_GAUGE_BUFFER",
 				Value: "true",
+			},
+			{
+				// The collector needs little CPU. Without this, the Go runtime
+				// sizes itself to the host core count, which inflates memory
+				// usage on large nodes (b/574002191).
+				Name:  "GOMAXPROCS",
+				Value: "1",
 			},
 			{
 				Name:  "PROJECT_NUMBER",
