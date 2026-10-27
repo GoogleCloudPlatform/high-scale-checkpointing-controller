@@ -6,7 +6,7 @@ require (
 	cloud.google.com/go/storage v1.69.0
 	github.com/container-storage-interface/spec v1.13.0
 	github.com/prometheus/client_golang v1.24.1
-	golang.org/x/net v0.59.0
+	golang.org/x/net v0.60.0
 	golang.org/x/sync v0.23.0
 	google.golang.org/api v0.300.0
 	google.golang.org/grpc v1.84.0
