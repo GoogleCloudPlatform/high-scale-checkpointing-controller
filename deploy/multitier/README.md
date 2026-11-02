@@ -41,6 +41,10 @@ kubectl apply -k deploy/multitier/controller
 kubectl apply -f crd/checkpointconfiguration.yaml
 ```
 
+When upgrading an existing install, apply the controller (step 3) before the
+CRD, because the CRD rejects spec changes that older controllers can make
+while updating finalizers.
+
 ## Setup workload dependencies
 To use the Multitier CSI driver, your workload will need to setup checkpointconfiguration and install dependencies.
 
@@ -63,6 +67,10 @@ gcloud storage buckets add-iam-policy-binding gs://$YOUR_GCS_BUCKET \
 ```bash
 kubectl apply -f examples/checkpointconfiguration.yaml
 ```
+
+The `spec` of a checkpoint configuration is immutable once created. To change
+it, delete and recreate the checkpoint configuration when no jobs are using it;
+deleting it while jobs are running removes the driver from their nodes.
 
 4. Verify the daemonset is running successfully by running the command below.
 

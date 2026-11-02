@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -987,4 +988,233 @@ func compareErrors(expect, actual error) bool {
 		return expect == nil
 	}
 	return expect.Error() == actual.Error()
+}
+
+const immutableSpecMessage = "CheckpointConfiguration spec is immutable"
+
+func immutabilityTestCPC(name string) *checkpoint.CheckpointConfiguration {
+	return &checkpoint.CheckpointConfiguration{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec: checkpoint.CheckpointConfigurationSpec{
+			CloudStorageBucketName: testGCSbucket,
+			InMemoryVolumeSize:     testInMemoryVolumeSize,
+			NodeSelector:           map[string]string{"pool": "tpu"},
+			Tolerations:            []corev1.Toleration{{Key: "google.com/tpu", Operator: corev1.TolerationOpExists}},
+			GcsFuseMountOptions:    []string{"implicit-dirs"},
+			ReplicationOptions:     []string{"verbose-logs"},
+		},
+	}
+}
+
+// unstructuredCPC returns a CPC whose JSON is exactly as given, so tests can
+// control fields that the typed Go struct would drop (omitempty) or always add.
+func unstructuredCPC(name string, spec map[string]interface{}) *unstructured.Unstructured {
+	u := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": cpcGroup + "/" + cpcVersion,
+		"kind":       cpcKind,
+		"metadata":   map[string]interface{}{"name": name},
+	}}
+	if spec != nil {
+		u.Object["spec"] = spec
+	}
+	return u
+}
+
+func expectImmutableError(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("expected spec change to be rejected, got success")
+	}
+	if !apierrors.IsInvalid(err) {
+		t.Fatalf("expected Invalid error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), immutableSpecMessage) {
+		t.Fatalf("expected error to contain %q, got %v", immutableSpecMessage, err)
+	}
+}
+
+// TestCPCSpecImmutable checks the CEL transition rule in
+// crd/checkpointconfiguration.yaml against a real API server (envtest).
+func TestCPCSpecImmutable(t *testing.T) {
+	_, c, cleanup := createClient(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	create := func(t *testing.T, name string) *checkpoint.CheckpointConfiguration {
+		t.Helper()
+		cpc := immutabilityTestCPC(name)
+		if err := c.Create(ctx, cpc); err != nil {
+			t.Fatalf("create %s: %v", name, err)
+		}
+		return cpc
+	}
+
+	specChanges := []struct {
+		name   string
+		mutate func(*checkpoint.CheckpointConfigurationSpec)
+	}{
+		{"inMemoryVolumeSize", func(s *checkpoint.CheckpointConfigurationSpec) { s.InMemoryVolumeSize = "128Gi" }},
+		{"cloudStorageBucketName", func(s *checkpoint.CheckpointConfigurationSpec) { s.CloudStorageBucketName = "other" }},
+		{"enableExternalJaxProcessIds", func(s *checkpoint.CheckpointConfigurationSpec) { s.EnableExternalJaxProcessIds = true }},
+		{"nodeSelector", func(s *checkpoint.CheckpointConfigurationSpec) { s.NodeSelector["pool"] = "other" }},
+		{"tolerations", func(s *checkpoint.CheckpointConfigurationSpec) { s.Tolerations = nil }},
+		{"csiEphemeralLimit", func(s *checkpoint.CheckpointConfigurationSpec) { s.CsiEphemeralLimit = "1Gi" }},
+		{"gcsFuseMountOptions", func(s *checkpoint.CheckpointConfigurationSpec) {
+			s.GcsFuseMountOptions = append(s.GcsFuseMountOptions, "file-cache:max-size-mb:-1")
+		}},
+		{"replicationOptions", func(s *checkpoint.CheckpointConfigurationSpec) { s.ReplicationOptions = nil }},
+	}
+	for _, tc := range specChanges {
+		t.Run("update rejected: "+tc.name, func(t *testing.T) {
+			cpc := create(t, "spec-change-"+strings.ToLower(tc.name))
+			tc.mutate(&cpc.Spec)
+			expectImmutableError(t, c.Update(ctx, cpc))
+		})
+	}
+
+	t.Run("merge patch rejected", func(t *testing.T) {
+		cpc := create(t, "patch-spec")
+		patch := client.RawPatch(types.MergePatchType, []byte(`{"spec":{"inMemoryVolumeSize":"1Gi"}}`))
+		expectImmutableError(t, c.Patch(ctx, cpc, patch))
+	})
+
+	t.Run("removing spec rejected", func(t *testing.T) {
+		cpc := create(t, "remove-spec")
+		patch := client.RawPatch(types.MergePatchType, []byte(`{"spec":null}`))
+		expectImmutableError(t, c.Patch(ctx, cpc, patch))
+	})
+
+	t.Run("no-op update allowed", func(t *testing.T) {
+		cpc := create(t, "noop")
+		if err := c.Update(ctx, cpc); err != nil {
+			t.Fatalf("no-op update: %v", err)
+		}
+	})
+
+	t.Run("labels and annotations allowed", func(t *testing.T) {
+		cpc := create(t, "metadata")
+		cpc.Labels = map[string]string{"team": "ml"}
+		cpc.Annotations = map[string]string{"note": "hello"}
+		if err := c.Update(ctx, cpc); err != nil {
+			t.Fatalf("metadata update: %v", err)
+		}
+	})
+
+	t.Run("finalizer patch allowed", func(t *testing.T) {
+		cpc := create(t, "finalizer")
+		orig := cpc.DeepCopy()
+		cpc.Finalizers = append(cpc.Finalizers, testFinalizer)
+		if err := c.Patch(ctx, cpc, client.MergeFromWithOptions(orig, client.MergeFromWithOptimisticLock{})); err != nil {
+			t.Fatalf("add finalizer: %v", err)
+		}
+		orig = cpc.DeepCopy()
+		cpc.Finalizers = nil
+		if err := c.Patch(ctx, cpc, client.MergeFromWithOptions(orig, client.MergeFromWithOptimisticLock{})); err != nil {
+			t.Fatalf("remove finalizer: %v", err)
+		}
+	})
+
+	t.Run("status update allowed", func(t *testing.T) {
+		cpc := create(t, "status")
+		cpc.Status.ReadyDriverPods = 3
+		if err := c.Status().Update(ctx, cpc); err != nil {
+			t.Fatalf("status update: %v", err)
+		}
+	})
+
+	t.Run("adding spec to a CPC without one allowed", func(t *testing.T) {
+		u := unstructuredCPC("no-spec", nil)
+		if err := c.Create(ctx, u); err != nil {
+			t.Fatalf("create without spec: %v", err)
+		}
+		u.Object["spec"] = map[string]interface{}{
+			"cloudStorageBucketName": testGCSbucket,
+			"inMemoryVolumeSize":     testInMemoryVolumeSize,
+		}
+		if err := c.Update(ctx, u); err != nil {
+			t.Fatalf("add spec: %v", err)
+		}
+	})
+
+	t.Run("delete allowed", func(t *testing.T) {
+		cpc := create(t, "delete")
+		if err := c.Delete(ctx, cpc); err != nil {
+			t.Fatalf("delete: %v", err)
+		}
+	})
+}
+
+// TestFinalizerWithOmitemptyFields is a regression test: the controller's
+// finalizer writes must not rewrite spec. A CPC stored with zero values that
+// the Go struct drops (omitempty) would otherwise trip the immutability rule,
+// so the driver DaemonSet would never be created and deletion would hang.
+func TestFinalizerWithOmitemptyFields(t *testing.T) {
+	rec, cleanup, err := initReconciler(t)
+	if err != nil {
+		t.Fatalf("init reconciler: %v", err)
+	}
+	defer cleanup()
+	ctx := context.Background()
+
+	const name = "omitempty"
+	u := unstructuredCPC(name, map[string]interface{}{
+		"cloudStorageBucketName":      testGCSbucket,
+		"inMemoryVolumeSize":          testInMemoryVolumeSize,
+		"enableExternalJaxProcessIds": false,
+		"nodeSelector":                map[string]interface{}{},
+		"tolerations": []interface{}{
+			map[string]interface{}{"key": "google.com/tpu", "operator": "Exists", "value": ""},
+		},
+		"gcsFuseMountOptions": []interface{}{},
+	})
+	if err := rec.Create(ctx, u); err != nil {
+		t.Fatalf("create cpc: %v", err)
+	}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: name}}
+
+	// Create path: finalizer added, DaemonSet created.
+	if _, err := rec.Reconcile(ctx, req); err != nil {
+		t.Fatalf("reconcile (create): %v", err)
+	}
+	var cpc checkpoint.CheckpointConfiguration
+	if err := rec.Get(ctx, req.NamespacedName, &cpc); err != nil {
+		t.Fatalf("get cpc: %v", err)
+	}
+	if len(cpc.Finalizers) != 1 || cpc.Finalizers[0] != testFinalizer {
+		t.Fatalf("expected finalizer %q, got %v", testFinalizer, cpc.Finalizers)
+	}
+	dsName := types.NamespacedName{Namespace: testCsiNamespace, Name: csiPrefix + "-" + string(cpc.UID)}
+	var ds = &unstructured.Unstructured{}
+	ds.SetAPIVersion("apps/v1")
+	ds.SetKind("DaemonSet")
+	if err := rec.Get(ctx, dsName, ds); err != nil {
+		t.Fatalf("expected driver daemonset %v: %v", dsName, err)
+	}
+
+	// The stored spec must be untouched by the finalizer write.
+	stored := unstructuredCPC(name, nil)
+	if err := rec.Get(ctx, req.NamespacedName, stored); err != nil {
+		t.Fatalf("get stored cpc: %v", err)
+	}
+	if v, found, _ := unstructured.NestedBool(stored.Object, "spec", "enableExternalJaxProcessIds"); !found || v {
+		t.Fatalf("expected spec.enableExternalJaxProcessIds=false to be preserved, found=%v value=%v", found, v)
+	}
+
+	// Delete path: DaemonSet deleted, then finalizer removed and CPC gone.
+	if err := rec.Delete(ctx, &cpc); err != nil {
+		t.Fatalf("delete cpc: %v", err)
+	}
+	for i := 0; i < 5; i++ {
+		res, err := rec.Reconcile(ctx, req)
+		if err != nil {
+			t.Fatalf("reconcile (delete, iteration %d): %v", i, err)
+		}
+		if !res.Requeue {
+			break
+		}
+	}
+	err = rec.Get(ctx, req.NamespacedName, &checkpoint.CheckpointConfiguration{})
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected cpc to be deleted after finalizer removal, got err=%v", err)
+	}
 }

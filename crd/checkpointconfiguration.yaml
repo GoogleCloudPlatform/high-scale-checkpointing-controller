@@ -29,6 +29,15 @@ spec:
     schema:
       openAPIV3Schema:
         type: object
+        # Transition rule, only evaluated on UPDATE. The controller never applies
+        # spec changes to an existing driver DaemonSet, so reject them instead of
+        # silently ignoring them. Metadata (labels, annotations, finalizers) and
+        # status can still be changed.
+        x-kubernetes-validations:
+        - rule: "!has(oldSelf.spec) || (has(self.spec) && self.spec == oldSelf.spec)"
+          message: "CheckpointConfiguration spec is immutable. To change it, delete and recreate the CheckpointConfiguration when no jobs are using it."
+          reason: FieldValueForbidden
+          fieldPath: .spec
         properties:
           spec:
             type: object

@@ -468,7 +468,10 @@ func (r *reconciler) addFinalizer(ctx context.Context, cc checkpoint.CheckpointC
 	ccClone := cc.DeepCopy()
 	ccClone.ObjectMeta.Finalizers = append(ccClone.ObjectMeta.Finalizers, r.finalizer)
 
-	err := r.Update(ctx, ccClone)
+	// Patch only metadata.finalizers. A full Update would re-serialize spec from
+	// the Go struct, dropping omitempty zero values (e.g. tolerations: []), and be
+	// rejected by the CRD's spec immutability rule.
+	err := r.Patch(ctx, ccClone, client.MergeFromWithOptions(&cc, client.MergeFromWithOptimisticLock{}))
 	if err != nil {
 		return fmt.Errorf("failed to add protection finalizer to checkpointconfiguration %v", err)
 	}
@@ -495,7 +498,8 @@ func (r *reconciler) removeFinalizer(ctx context.Context, cc *checkpoint.Checkpo
 	log.FromContext(ctx).Info("remove finalizer", "cpc", cc.Spec)
 	ccClone := cc.DeepCopy()
 	ccClone.ObjectMeta.Finalizers = slices.DeleteFunc(ccClone.ObjectMeta.Finalizers, func(f string) bool { return f == r.finalizer })
-	err := r.Update(ctx, ccClone)
+	// Patch only metadata.finalizers; see addFinalizer.
+	err := r.Patch(ctx, ccClone, client.MergeFromWithOptions(cc, client.MergeFromWithOptimisticLock{}))
 
 	if err != nil {
 		return fmt.Errorf("failed to remove protection finalizer from checkpointconfiguration %s, %v", cc.Name, err)
